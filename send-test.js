@@ -1,39 +1,35 @@
-require('dotenv').config();
-const axios = require('axios');
+const payload = {
+  object: "whatsapp_business_account",
+  entry: [{
+    id: "1212445375277979",
+    changes: [{
+      value: {
+        messaging_product: "whatsapp",
+        metadata: {
+          display_phone_number: "15556660243",
+          phone_number_id: "1212445375277979"
+        },
+        contacts: [{
+          profile: { name: "Test User" },
+          wa_id: "919039744212"
+        }],
+        messages: [{
+          from: "919039744212",
+          id: "wamid.mockID123456789",
+          timestamp: Math.floor(Date.now() / 1000).toString(),
+          type: "text",
+          text: { body: "Ping" }
+        }]
+      },
+      field: "messages"
+    }]
+  }]
+};
 
-const token = process.env.WHATSAPP_TOKEN;
-// This is the Phone Number ID from your dashboard screen (usually 15 digits)
-const phone_number_id = "1212445375277979"; 
-const recipient_phone = "919039744212"; 
-
-async function sendWhatsAppMessage() {
-    try {
-        const response = await axios({
-            method: 'POST',
-            url: `https://graph.facebook.com/v18.0/${phone_number_id}/messages`,
-            headers: {
-                'Authorization': `Bearer ${token}`,
-                'Content-Type': 'application/json'
-            },
-            data: {
-                messaging_product: "whatsapp",
-                to: recipient_phone,
-                type: "template",
-                template: {
-                    name: "hello_world",
-                    language: { code: "en_US" }
-                }
-            }
-        });
-        console.log("🚀 SUCCESS! Meta accepted the message:", response.data);
-    } catch (error) {
-        console.error("❌ META ERROR DETAILS:");
-        if (error.response) {
-            console.error(JSON.stringify(error.response.data, null, 2));
-        } else {
-            console.error(error.message);
-        }
-    }
-}
-
-sendWhatsAppMessage();
+fetch("https://whatsapp-saas-backend-qv85.onrender.com/webhook", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(payload)
+})
+.then(res => console.log("✅ Simulated message sent! Render replied with status:", res.status))
+.catch(err => console.error("❌ Error:", err));
