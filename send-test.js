@@ -1,7 +1,7 @@
 // backend/send-test.js
 const fetch = require('node-fetch');
 
-// This mimics exactly how Meta sends a message to your bot
+// This mimics exactly what Meta sends when a user clicks the "View Products" button
 const mockPayload = {
     "object": "whatsapp_business_account",
     "entry": [{
@@ -9,8 +9,15 @@ const mockPayload = {
             "value": {
                 "messages": [{
                     "from": "919039744212",
-                    "id": "test_id_" + Date.now(),
-                    "text": { "body": "menu" } 
+                    "id": "click_id_" + Date.now(),
+                    "type": "interactive",
+                    "interactive": {
+                        "type": "button_reply",
+                        "button_reply": {
+                            "id": "products", // The hidden ID that triggers the image catalog
+                            "title": "📁 View Products"
+                        }
+                    }
                 }]
             }
         }]
@@ -18,10 +25,10 @@ const mockPayload = {
 };
 
 async function test() {
-    // ⚠️ IMPORTANT: Point this to your live Render webhook URL
+    // ⚠️ Ensure this is your live Render webhook URL
     const url = 'https://whatsapp-saas-backend-qv85.onrender.com/webhook';
     
-    console.log("🚀 Sending 'menu' to the Webhook...");
+    console.log("🚀 Simulating 'View Products' Button Click...");
 
     try {
         const response = await fetch(url, {
@@ -31,9 +38,9 @@ async function test() {
         });
 
         if (response.status === 200) {
-            console.log("✅ Webhook triggered successfully!");
+            console.log("✅ Webhook triggered successfully! Check your Flutter dashboard.");
         } else {
-            console.log("❌ Webhook failed. Check your Render logs.");
+            console.log("❌ Webhook failed with status code:", response.status);
         }
     } catch (error) {
         console.error("❌ Error:", error);
