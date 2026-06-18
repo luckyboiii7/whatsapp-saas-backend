@@ -65,6 +65,27 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     }
 }
 
+// ====================================================================
+// NEW DASHBOARD ENDPOINT: Fetch chat log history for a specific number
+// ====================================================================
+app.get('/api/messages/:phoneNumber', async (req, res) => {
+    try {
+        const { phoneNumber } = req.params;
+        
+        // Find all messages matching the phone number, sorted oldest to newest
+        const chatHistory = await Message.find({ fromNumber: phoneNumber }).sort({ timestamp: 1 });
+        
+        return res.status(200).json({
+            success: true,
+            count: chatHistory.length,
+            data: chatHistory
+        });
+    } catch (error) {
+        console.error("❌ Error fetching chat history:", error);
+        return res.status(500).json({ success: false, error: "Internal Server Error" });
+    }
+});
+
 // Webhook Verification Route (GET)
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
@@ -127,7 +148,6 @@ app.post('/webhook', async (req, res) => {
                     replyText = `📞 *Get In Touch:*\n\nYou can reach our main desk directly here. Drop your requirements or sizes, and a team member will get back to you shortly!`;
                 } 
                 else {
-                    // Fallback response if no keywords match
                     replyText = `🤖 Sorry, I didn't quite catch that. \n\nType *Hi* or *Hello* to view our main service menu!`;
                 }
 
