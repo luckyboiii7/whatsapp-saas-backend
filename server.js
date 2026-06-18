@@ -95,13 +95,13 @@ app.post('/webhook', async (req, res) => {
         if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
             const messageData = body.entry[0].changes[0].value.messages[0];
             const from = messageData.from; 
-            const msgBody = messageData.text ? messageData.text.body : "";
+            const msgBody = messageData.text ? messageData.text.body.trim() : "";
             const messageId = messageData.id;
 
             console.log(`🤖 Processing message from ${from}: "${msgBody}"`);
 
             try {
-                // Save the incoming WhatsApp text to MongoDB Atlas
+                // 1. Save the incoming WhatsApp text to MongoDB Atlas
                 await Message.create({
                     whatsappId: messageId,
                     fromNumber: from,
@@ -110,11 +110,31 @@ app.post('/webhook', async (req, res) => {
                 });
                 console.log("💾 Incoming message saved to database.");
 
-                // Trigger the automated reply text
-                const replyText = `Hello! Thanks for messaging. Your text "${msgBody}" was processed successfully by our SaaS Engine. ✨`;
+                // 2. Intelligent Keyword Routing Logic
+                let replyText = "";
+                const cleanMessage = msgBody.toLowerCase();
+
+                if (cleanMessage.includes("hi") || cleanMessage.includes("hello") || cleanMessage.includes("hey")) {
+                    replyText = `👋 Welcome to Wadhwa Plywood & Hardware!\n\nHow can we help you today? Reply with a keyword:\n📦 *Products* - View available inventory\n📍 *Location* - Find our store\n📞 *Contact* - Talk to a representative`;
+                } 
+                else if (cleanMessage.includes("product") || cleanMessage.includes("inventory") || cleanMessage.includes("catalog")) {
+                    replyText = `📦 *Our Core Offerings:*\n\n1. Premium Plywood & Laminates\n2. Modular Kitchen Hardware\n3. Designer Handles & Locks\n4. Screws, Fixtures, & Tools\n\nLet us know what items you need a quote for!`;
+                } 
+                else if (cleanMessage.includes("location") || cleanMessage.includes("address") || cleanMessage.includes("store")) {
+                    replyText = `📍 *Visit Our Store:*\n\nCome visit us at Wadhwa Plywood & Hardware during normal operating hours to view our full collection in person!`;
+                } 
+                else if (cleanMessage.includes("contact") || cleanMessage.includes("support") || cleanMessage.includes("call")) {
+                    replyText = `📞 *Get In Touch:*\n\nYou can reach our main desk directly here. Drop your requirements or sizes, and a team member will get back to you shortly!`;
+                } 
+                else {
+                    // Fallback response if no keywords match
+                    replyText = `🤖 Sorry, I didn't quite catch that. \n\nType *Hi* or *Hello* to view our main service menu!`;
+                }
+
+                // 3. Trigger the dynamic outbound automated reply text
                 const outboundId = await sendWhatsAppMessage(from, replyText);
 
-                // Save our outbound auto-reply to MongoDB Atlas
+                // 4. Save our outbound auto-reply to MongoDB Atlas
                 await Message.create({
                     whatsappId: outboundId || `reply-${messageId}`,
                     fromNumber: from,
@@ -141,5 +161,5 @@ app.get('/', (req, res) => {
 
 // Start the Server
 app.listen(PORT, () => {
-    console.log(`Server is running smoothly on port ${PORT}`);
+    console.log("Server is running smoothly on port " + PORT);
 });
