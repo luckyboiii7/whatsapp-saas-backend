@@ -1,7 +1,11 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const cors = require('cors'); // 👈 1. Import CORS
 const Message = require('./models/Message');
 const app = express();
+
+// 👈 2. Enable CORS so your Flutter frontend can read the data!
+app.use(cors()); 
 
 // Middleware to parse incoming JSON payloads
 app.use(express.json());
@@ -66,7 +70,7 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
 }
 
 // ====================================================================
-// NEW DASHBOARD ENDPOINT: Fetch chat log history for a specific number
+// DASHBOARD ENDPOINT: Fetch chat log history for a specific number
 // ====================================================================
 app.get('/api/messages/:phoneNumber', async (req, res) => {
     try {
@@ -122,7 +126,7 @@ app.post('/webhook', async (req, res) => {
             console.log(`🤖 Processing message from ${from}: "${msgBody}"`);
 
             try {
-                // 1. Save the incoming WhatsApp text to MongoDB Atlas
+                // Save the incoming WhatsApp text to MongoDB Atlas
                 await Message.create({
                     whatsappId: messageId,
                     fromNumber: from,
@@ -131,7 +135,7 @@ app.post('/webhook', async (req, res) => {
                 });
                 console.log("💾 Incoming message saved to database.");
 
-                // 2. Intelligent Keyword Routing Logic
+                // Intelligent Keyword Routing Logic
                 let replyText = "";
                 const cleanMessage = msgBody.toLowerCase();
 
@@ -151,10 +155,10 @@ app.post('/webhook', async (req, res) => {
                     replyText = `🤖 Sorry, I didn't quite catch that. \n\nType *Hi* or *Hello* to view our main service menu!`;
                 }
 
-                // 3. Trigger the dynamic outbound automated reply text
+                // Trigger the dynamic outbound automated reply text
                 const outboundId = await sendWhatsAppMessage(from, replyText);
 
-                // 4. Save our outbound auto-reply to MongoDB Atlas
+                // Save our outbound auto-reply to MongoDB Atlas
                 await Message.create({
                     whatsappId: outboundId || `reply-${messageId}`,
                     fromNumber: from,
