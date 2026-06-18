@@ -4,7 +4,7 @@ const cors = require('cors');
 const Message = require('./models/Message');
 const app = express();
 
-// Enable CORS so your Flutter frontend can read/write data!
+// Enable CORS so your Flutter frontend can read/write data safely
 app.use(cors()); 
 
 // Middleware to parse incoming JSON payloads
@@ -75,9 +75,15 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
 app.get('/api/messages/:phoneNumber', async (req, res) => {
     try {
         const { phoneNumber } = req.params;
-        const chatHistory = await Message.find({ fromNumber: phoneNumber }).sort({ timestamp: 1 });
         
-        return res.status(200).json({ success: true, count: chatHistory.length, data: chatHistory });
+        // Explicitly query by fromNumber as a clean string to prevent Mongoose ObjectId casting bugs
+        const chatHistory = await Message.find({ fromNumber: String(phoneNumber) }).sort({ timestamp: 1 });
+        
+        return res.status(200).json({ 
+            success: true, 
+            count: chatHistory.length, 
+            data: chatHistory 
+        });
     } catch (error) {
         console.error("❌ Error fetching chat history:", error);
         return res.status(500).json({ success: false, error: "Internal Server Error" });
@@ -104,7 +110,7 @@ app.post('/api/messages/send', async (req, res) => {
             // 2. Save it to MongoDB so it shows up in the chat UI
             await Message.create({
                 whatsappId: outboundId,
-                fromNumber: phoneNumber,
+                fromNumber: String(phoneNumber),
                 body: message,
                 direction: 'outgoing'
             });
@@ -156,7 +162,7 @@ app.post('/webhook', async (req, res) => {
                 // Save incoming message
                 await Message.create({
                     whatsappId: messageId,
-                    fromNumber: from,
+                    fromNumber: String(from),
                     body: msgBody,
                     direction: 'incoming'
                 });
@@ -183,7 +189,7 @@ app.post('/webhook', async (req, res) => {
                 // Save outbound auto-reply
                 await Message.create({
                     whatsappId: outboundId || `reply-${messageId}`,
-                    fromNumber: from,
+                    fromNumber: String(from),
                     body: replyText,
                     direction: 'outgoing'
                 });
