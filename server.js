@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
-const User = require('./models/User'); // 👈 1. Import the new User model
+const User = require('./models/user'); // 👈 1. Import the new User model
 const app = express();
 
 app.use(cors()); 
