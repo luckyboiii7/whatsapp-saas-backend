@@ -6,13 +6,13 @@ const { Server } = require('socket.io');
 
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
-const User = require('./models/user'); // Ensure this matches your filename exactly (user.js)
+const User = require('./models/user'); 
+const BotStatus = require('./models/BotStatus'); // 🧠 New Bot Status Tracker
 
 const app = express();
 app.use(cors()); 
 app.use(express.json());
 
-// WebSocket Server Wrapper
 const server = http.createServer(app);
 const io = new Server(server, {
     cors: { origin: "*", methods: ["GET", "POST"] }
@@ -111,6 +111,38 @@ async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
 // ====================================================================
 // SAAS API ENDPOINTS
 // ====================================================================
+
+// 🧠 NEW: Endpoint to pause/resume the bot for a specific customer chat
+app.post('/api/bot/toggle', async (req, res) => {
+    try {
+        const { customerPhone, isBotPaused } = req.body;
+        if (!customerPhone) return res.status(400).json({ success: false, message: "Missing phone number" });
+
+        const status = await BotStatus.findOneAndUpdate(
+            { customerPhone: String(customerPhone) },
+            { isBotPaused: isBotPaused, updatedAt: Date.now() },
+            { upsert: true, new: true }
+        );
+
+        // Notify Flutter UI instantly about status update
+        io.emit('bot_status_changed', status);
+
+        return res.status(200).json({ success: true, data: status });
+    } catch (error) {
+        return res.status(500).json({ success: false });
+    }
+});
+
+// 🧠 NEW: Endpoint to fetch current bot status for a chat
+app.get('/api/bot/status/:customerPhone', async (req, res) => {
+    try {
+        const status = await BotStatus.findOne({ customerPhone: String(req.params.customerPhone) });
+        return res.status(200).json({ success: true, isBotPaused: status ? status.isBotPaused : false });
+    } catch (error) {
+        return res.status(500).json({ success: false });
+    }
+});
+
 app.post('/api/register', async (req, res) => {
     try {
         const { businessName, phoneNumber } = req.body;
@@ -170,7 +202,7 @@ app.post('/api/rules', async (req, res) => {
 });
 
 // ====================================================================
-// WEBHOOK (THE BOT BRAIN)
+// WEBHOOK (THE BOT BRAIN WITH PAUSE CHECK)
 // ====================================================================
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
@@ -200,8 +232,16 @@ app.post('/webhook', async (req, res) => {
 
             if (msgBody) {
                 try {
+                    // Always record incoming user messages so the human agent can see them
                     const incomingMsg = await Message.create({ whatsappId: messageId, fromNumber: String(from), body: msgBody, direction: 'incoming' });
                     io.emit('new_message', incomingMsg);
+
+                    // 🧠 Check if the bot is paused for this specific customer
+                    const botStatus = await BotStatus.findOne({ customerPhone: String(from) });
+                    if (botStatus && botStatus.isBotPaused) {
+                        console.log(`🤫 Bot is PAUSED for ${from}. Ignoring auto-reply logic.`);
+                        return res.status(200).send('EVENT_RECEIVED');
+                    }
 
                     const lookupQuery = buttonIdMatch ? buttonIdMatch.toLowerCase() : msgBody.toLowerCase();
                     

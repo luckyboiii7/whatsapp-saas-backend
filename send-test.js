@@ -1,29 +1,46 @@
 // backend/send-test.js
 const fetch = require('node-fetch');
 
-// CHANGE THIS MESSAGE TO TEST DIFFERENT TRIGGERS:
-// Options: "menu", "hours", "hi", "ping"
-const TEST_MESSAGE = "menu"; 
+// This mimics exactly what Meta sends when a user clicks the "Store Hours" button
+const mockPayload = {
+    "object": "whatsapp_business_account",
+    "entry": [{
+        "changes": [{
+            "value": {
+                "messages": [{
+                    "from": "919039744212",
+                    "id": "click_id_" + Date.now(),
+                    "type": "interactive",
+                    "interactive": {
+                        "type": "button_reply",
+                        "button_reply": {
+                            "id": "hours", // The hidden ID for Store Hours
+                            "title": "⏰ Store Hours"
+                        }
+                    }
+                }]
+            }
+        }]
+    }]
+};
 
 async function test() {
-    const url = 'https://whatsapp-saas-backend-qv85.onrender.com/api/messages/send';
+    // ⚠️ IMPORTANT: Point this to your live Render webhook URL
+    const url = 'https://whatsapp-saas-backend-qv85.onrender.com/webhook';
     
-    console.log(`🚀 Sending test message: "${TEST_MESSAGE}"...`);
+    console.log("🚀 Sending 'menu' to the Webhook...");
 
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                phoneNumber: '919039744212', // This is your customer's number
-                message: TEST_MESSAGE
-            })
+            body: JSON.stringify(mockPayload)
         });
 
-        if (response.ok) {
-            console.log("✅ Message sent successfully! Check your Flutter dashboard.");
+        if (response.status === 200) {
+            console.log("✅ Webhook triggered successfully!");
         } else {
-            console.log("❌ Failed to send. Make sure your Render backend is running.");
+            console.log("❌ Webhook failed. Check your Render logs.");
         }
     } catch (error) {
         console.error("❌ Error:", error);
