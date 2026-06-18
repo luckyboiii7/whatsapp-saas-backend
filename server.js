@@ -1,5 +1,6 @@
 const express = require('express');
 const mongoose = require('mongoose');
+const Message = require('./models/Message');
 const app = express();
 
 // Middleware to parse incoming JSON payloads
@@ -8,32 +9,21 @@ app.use(express.json());
 // PORT Configuration
 const PORT = process.env.PORT || 3000;
 
-// 1. MongoDB Connection Setup
+// MongoDB Connection Setup
 const MONGO_URI = process.env.MONGO_URI || "your_local_or_atlas_mongodb_connection_string_here";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log("💾 Successfully connected to MongoDB Atlas Cloud!"))
     .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
-// 2. Database Schema & Model for Chat Logs
-const MessageSchema = new mongoose.Schema({
-    whatsappId: { type: String, required: true }, 
-    fromNumber: { type: String, required: true }, 
-    body: { type: String, required: true },       
-    timestamp: { type: Date, default: Date.now }, 
-    direction: { type: String, enum: ['incoming', 'outgoing'], required: true }
-});
-
-const Message = mongoose.model('Message', MessageSchema);
-
-// 3. Helper function to send outbound messages via Meta API
+// Helper function to send outbound messages via Meta API
 async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
     const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
 
     if (!ACCESS_TOKEN) {
         console.error("❌ Outbound Error: WHATSAPP_ACCESS_TOKEN is missing in environment variables.");
-        return;
+        return null;
     }
 
     const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
@@ -75,7 +65,7 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     }
 }
 
-// 4. Webhook Verification Route (GET)
+// Webhook Verification Route (GET)
 app.get('/webhook', (req, res) => {
     const mode = req.query['hub.mode'];
     const token = req.query['hub.verify_token'];
@@ -95,7 +85,7 @@ app.get('/webhook', (req, res) => {
     res.status(200).send("WhatsApp Webhook Server is running!");
 });
 
-// 5. Webhook Event Receiver Route (POST)
+// Webhook Event Receiver Route (POST)
 app.post('/webhook', async (req, res) => {
     console.log("📩 New Webhook Received:\n", JSON.stringify(req.body, null, 2));
 
@@ -131,3 +121,25 @@ app.post('/webhook', async (req, res) => {
                     body: replyText,
                     direction: 'outgoing'
                 });
+                console.log("💾 Outbound auto-reply saved to database.");
+
+            } catch (dbError) {
+                console.error("❌ Database Storage Error:", dbError);
+            }
+        }
+        
+        return res.status(200).send('EVENT_RECEIVED');
+    } else {
+        return res.sendStatus(404);
+    }
+});
+
+// Root Route
+app.get('/', (req, res) => {
+    res.send('Server is alive and running!');
+});
+
+// Start the Server
+app.listen(PORT, () => {
+    console.log(`Server is running smoothly on port ${PORT}`);
+});
