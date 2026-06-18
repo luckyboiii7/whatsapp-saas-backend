@@ -1,10 +1,10 @@
 const express = require('express');
 const mongoose = require('mongoose');
-const cors = require('cors'); // 👈 1. Import CORS
+const cors = require('cors');
 const Message = require('./models/Message');
 const app = express();
 
-// 👈 2. Enable CORS so your Flutter frontend can read the data!
+// Enable CORS so your Flutter frontend can read/write data!
 app.use(cors()); 
 
 // Middleware to parse incoming JSON payloads
@@ -57,7 +57,7 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
         const data = await response.json();
 
         if (response.ok) {
-            console.log(`🚀 Auto-reply sent successfully! Message ID:`, data.messages[0].id);
+            console.log(`🚀 Outbound message sent successfully! Message ID:`, data.messages[0].id);
             return data.messages[0].id;
         } else {
             console.error("❌ Meta API Error Response:", JSON.stringify(data, null, 2));
@@ -70,22 +70,51 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
 }
 
 // ====================================================================
-// DASHBOARD ENDPOINT: Fetch chat log history for a specific number
+// ENDPOINT 1: Fetch chat log history for a specific number
 // ====================================================================
 app.get('/api/messages/:phoneNumber', async (req, res) => {
     try {
         const { phoneNumber } = req.params;
-        
-        // Find all messages matching the phone number, sorted oldest to newest
         const chatHistory = await Message.find({ fromNumber: phoneNumber }).sort({ timestamp: 1 });
         
-        return res.status(200).json({
-            success: true,
-            count: chatHistory.length,
-            data: chatHistory
-        });
+        return res.status(200).json({ success: true, count: chatHistory.length, data: chatHistory });
     } catch (error) {
         console.error("❌ Error fetching chat history:", error);
+        return res.status(500).json({ success: false, error: "Internal Server Error" });
+    }
+});
+
+// ====================================================================
+// ENDPOINT 2: Send a manual message from the Dashboard
+// ====================================================================
+app.post('/api/messages/send', async (req, res) => {
+    try {
+        const { phoneNumber, message } = req.body;
+        
+        if (!phoneNumber || !message) {
+            return res.status(400).json({ success: false, error: "Missing phoneNumber or message text" });
+        }
+
+        console.log(`💻 Dashboard requested manual reply to ${phoneNumber}: "${message}"`);
+
+        // 1. Send it via Meta
+        const outboundId = await sendWhatsAppMessage(phoneNumber, message);
+
+        if (outboundId) {
+            // 2. Save it to MongoDB so it shows up in the chat UI
+            await Message.create({
+                whatsappId: outboundId,
+                fromNumber: phoneNumber,
+                body: message,
+                direction: 'outgoing'
+            });
+            console.log("💾 Dashboard manual reply saved to database.");
+            return res.status(200).json({ success: true });
+        } else {
+            return res.status(500).json({ success: false, error: "Failed to send via Meta" });
+        }
+    } catch (error) {
+        console.error("❌ Error sending manual message:", error);
         return res.status(500).json({ success: false, error: "Internal Server Error" });
     }
 });
@@ -112,8 +141,6 @@ app.get('/webhook', (req, res) => {
 
 // Webhook Event Receiver Route (POST)
 app.post('/webhook', async (req, res) => {
-    console.log("📩 New Webhook Received:\n", JSON.stringify(req.body, null, 2));
-
     const body = req.body;
 
     if (body.object === 'whatsapp_business_account') {
@@ -126,52 +153,45 @@ app.post('/webhook', async (req, res) => {
             console.log(`🤖 Processing message from ${from}: "${msgBody}"`);
 
             try {
-                // Save the incoming WhatsApp text to MongoDB Atlas
+                // Save incoming message
                 await Message.create({
                     whatsappId: messageId,
                     fromNumber: from,
                     body: msgBody,
                     direction: 'incoming'
                 });
-                console.log("💾 Incoming message saved to database.");
 
                 // Intelligent Keyword Routing Logic
                 let replyText = "";
                 const cleanMessage = msgBody.toLowerCase();
 
                 if (cleanMessage.includes("hi") || cleanMessage.includes("hello") || cleanMessage.includes("hey")) {
-                    replyText = `👋 Welcome to Wadhwa Plywood & Hardware!\n\nHow can we help you today? Reply with a keyword:\n📦 *Products* - View available inventory\n📍 *Location* - Find our store\n📞 *Contact* - Talk to a representative`;
-                } 
-                else if (cleanMessage.includes("product") || cleanMessage.includes("inventory") || cleanMessage.includes("catalog")) {
-                    replyText = `📦 *Our Core Offerings:*\n\n1. Premium Plywood & Laminates\n2. Modular Kitchen Hardware\n3. Designer Handles & Locks\n4. Screws, Fixtures, & Tools\n\nLet us know what items you need a quote for!`;
-                } 
-                else if (cleanMessage.includes("location") || cleanMessage.includes("address") || cleanMessage.includes("store")) {
-                    replyText = `📍 *Visit Our Store:*\n\nCome visit us at Wadhwa Plywood & Hardware during normal operating hours to view our full collection in person!`;
-                } 
-                else if (cleanMessage.includes("contact") || cleanMessage.includes("support") || cleanMessage.includes("call")) {
-                    replyText = `📞 *Get In Touch:*\n\nYou can reach our main desk directly here. Drop your requirements or sizes, and a team member will get back to you shortly!`;
-                } 
-                else {
-                    replyText = `🤖 Sorry, I didn't quite catch that. \n\nType *Hi* or *Hello* to view our main service menu!`;
+                    replyText = `👋 Welcome to Wadhwa Plywood & Hardware!\n\nHow can we help you today? Reply with a keyword:\n📦 *Products*\n📍 *Location*\n📞 *Contact*`;
+                } else if (cleanMessage.includes("product") || cleanMessage.includes("inventory")) {
+                    replyText = `📦 *Our Core Offerings:*\n1. Premium Plywood\n2. Modular Hardware\n3. Designer Locks`;
+                } else if (cleanMessage.includes("location") || cleanMessage.includes("address")) {
+                    replyText = `📍 *Visit Our Store:*\nCome visit us at Wadhwa Plywood & Hardware during normal hours!`;
+                } else if (cleanMessage.includes("contact") || cleanMessage.includes("support")) {
+                    replyText = `📞 *Get In Touch:*\nDrop your requirements here, and a team member will get back to you shortly!`;
+                } else {
+                    replyText = `🤖 Sorry, I didn't quite catch that. Type *Hi* or *Hello* to view our main service menu!`;
                 }
 
-                // Trigger the dynamic outbound automated reply text
+                // Trigger outbound reply
                 const outboundId = await sendWhatsAppMessage(from, replyText);
 
-                // Save our outbound auto-reply to MongoDB Atlas
+                // Save outbound auto-reply
                 await Message.create({
                     whatsappId: outboundId || `reply-${messageId}`,
                     fromNumber: from,
                     body: replyText,
                     direction: 'outgoing'
                 });
-                console.log("💾 Outbound auto-reply saved to database.");
 
             } catch (dbError) {
                 console.error("❌ Database Storage Error:", dbError);
             }
         }
-        
         return res.status(200).send('EVENT_RECEIVED');
     } else {
         return res.sendStatus(404);
@@ -179,11 +199,6 @@ app.post('/webhook', async (req, res) => {
 });
 
 // Root Route
-app.get('/', (req, res) => {
-    res.send('Server is alive and running!');
-});
+app.get('/', (req, res) => res.send('Server is alive and running!'));
 
-// Start the Server
-app.listen(PORT, () => {
-    console.log("Server is running smoothly on port " + PORT);
-});
+app.listen(PORT, () => console.log("Server is running smoothly on port " + PORT));
