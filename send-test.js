@@ -1,7 +1,7 @@
 // backend/send-test.js
 const fetch = require('node-fetch');
 
-// This mimics exactly what Meta sends when a user clicks the "Store Hours" button
+// This mimics exactly how Meta sends a message to your bot
 const mockPayload = {
     "object": "whatsapp_business_account",
     "entry": [{
@@ -9,15 +9,8 @@ const mockPayload = {
             "value": {
                 "messages": [{
                     "from": "919039744212",
-                    "id": "click_id_" + Date.now(),
-                    "type": "interactive",
-                    "interactive": {
-                        "type": "button_reply",
-                        "button_reply": {
-                            "id": "hours", // The hidden ID for Store Hours
-                            "title": "⏰ Store Hours"
-                        }
-                    }
+                    "id": "test_id_" + Date.now(),
+                    "text": { "body": "menu" } 
                 }]
             }
         }]

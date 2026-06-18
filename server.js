@@ -7,7 +7,7 @@ const { Server } = require('socket.io');
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
 const User = require('./models/user'); 
-const BotStatus = require('./models/BotStatus'); // 🧠 New Bot Status Tracker
+const BotStatus = require('./models/BotStatus'); 
 
 const app = express();
 app.use(cors()); 
@@ -35,7 +35,7 @@ io.on('connection', (socket) => {
 });
 
 // ====================================================================
-// META API HELPERS
+// META API HELPERS (TEXT, BUTTONS, & MEDIA)
 // ====================================================================
 async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
@@ -108,11 +108,45 @@ async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
     }
 }
 
+// 🧠 NEW: Send Rich Media (Images or PDF Documents)
+async function sendWhatsAppMedia(toPhoneNumber, mediaType, mediaUrl, captionText = "") {
+    const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
+    const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+
+    if (!ACCESS_TOKEN) return null;
+
+    const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+    
+    const payload = {
+        messaging_product: "whatsapp",
+        recipient_type: "individual",
+        to: toPhoneNumber,
+        type: mediaType, // "image" or "document"
+    };
+
+    if (mediaType === "image") {
+        payload.image = { link: mediaUrl, caption: captionText };
+    } else if (mediaType === "document") {
+        payload.document = { link: mediaUrl, filename: "Catalog.pdf", caption: captionText };
+    }
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+        });
+        const data = await response.json();
+        if (response.ok) return data.messages[0].id;
+        return null;
+    } catch (error) {
+        return null;
+    }
+}
+
 // ====================================================================
 // SAAS API ENDPOINTS
 // ====================================================================
-
-// 🧠 NEW: Endpoint to pause/resume the bot for a specific customer chat
 app.post('/api/bot/toggle', async (req, res) => {
     try {
         const { customerPhone, isBotPaused } = req.body;
@@ -124,16 +158,13 @@ app.post('/api/bot/toggle', async (req, res) => {
             { upsert: true, new: true }
         );
 
-        // Notify Flutter UI instantly about status update
         io.emit('bot_status_changed', status);
-
         return res.status(200).json({ success: true, data: status });
     } catch (error) {
         return res.status(500).json({ success: false });
     }
 });
 
-// 🧠 NEW: Endpoint to fetch current bot status for a chat
 app.get('/api/bot/status/:customerPhone', async (req, res) => {
     try {
         const status = await BotStatus.findOne({ customerPhone: String(req.params.customerPhone) });
@@ -202,7 +233,7 @@ app.post('/api/rules', async (req, res) => {
 });
 
 // ====================================================================
-// WEBHOOK (THE BOT BRAIN WITH PAUSE CHECK)
+// WEBHOOK (THE BOT BRAIN WITH MEDIA ROUTING)
 // ====================================================================
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
@@ -232,14 +263,12 @@ app.post('/webhook', async (req, res) => {
 
             if (msgBody) {
                 try {
-                    // Always record incoming user messages so the human agent can see them
                     const incomingMsg = await Message.create({ whatsappId: messageId, fromNumber: String(from), body: msgBody, direction: 'incoming' });
                     io.emit('new_message', incomingMsg);
 
-                    // 🧠 Check if the bot is paused for this specific customer
                     const botStatus = await BotStatus.findOne({ customerPhone: String(from) });
                     if (botStatus && botStatus.isBotPaused) {
-                        console.log(`🤫 Bot is PAUSED for ${from}. Ignoring auto-reply logic.`);
+                        console.log(`🤫 Bot is PAUSED for ${from}.`);
                         return res.status(200).send('EVENT_RECEIVED');
                     }
 
@@ -256,7 +285,17 @@ app.post('/webhook', async (req, res) => {
                         const outboundId = await sendWhatsAppButtons(from, multiChoiceBody, buttonMenu);
                         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
-                    } else {
+                    } 
+                    // 🧠 NEW: Handle "View Products" Button Click with Media Output
+                    else if (lookupQuery === 'products') {
+                        const sampleImageUrl = "https://images.unsplash.com/photo-1533090161767-e6ffed986c88?w=800"; // Beautiful interior/wood sample placeholder
+                        const caption = "📁 Premium Commercial Plywood, Flush Doors, and Decorative Laminates stack available in stock!";
+                        
+                        const outboundId = await sendWhatsAppMedia(from, "image", sampleImageUrl, caption);
+                        const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Image Catalog]: ${caption}`, direction: 'outgoing' });
+                        io.emit('new_message', systemReply);
+                    } 
+                    else {
                         const matchedRule = await Rule.findOne({ keyword: lookupQuery });
                         let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
 
