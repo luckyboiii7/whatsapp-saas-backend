@@ -2,7 +2,8 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const Message = require('./models/Message');
-const Rule = require('./models/Rule'); // 👈 Import our new Bot Brain model!
+const Rule = require('./models/Rule'); 
+const User = require('./models/User'); // 👈 1. Import the new User model
 const app = express();
 
 app.use(cors()); 
@@ -45,10 +46,39 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
 }
 
 // ====================================================================
-// NEW: BOT BUILDER ENDPOINTS
+// NEW: SAAS REGISTRATION / LOGIN ENDPOINT
 // ====================================================================
+app.post('/api/register', async (req, res) => {
+    try {
+        const { businessName, phoneNumber } = req.body;
+        
+        if (!businessName || !phoneNumber) {
+            return res.status(400).json({ success: false, message: "Missing business name or phone number" });
+        }
 
-// A. Get all saved bot rules
+        // 1. Check if this business already exists (Login)
+        let user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        
+        if (user) {
+            console.log(`👋 Existing business logged in: ${user.businessName}`);
+            return res.status(200).json({ success: true, message: "Welcome back!", user });
+        }
+
+        // 2. If they don't exist, create a new account (Registration)
+        user = await User.create({ businessName, phoneNumber: String(phoneNumber) });
+        console.log(`🏢 New Business Registered: ${businessName} (${phoneNumber})`);
+        
+        return res.status(201).json({ success: true, message: "Account created successfully!", user });
+
+    } catch (error) {
+        console.error("❌ Registration Error:", error);
+        return res.status(500).json({ success: false, message: "Internal Server Error" });
+    }
+});
+
+// ====================================================================
+// BOT BUILDER ENDPOINTS
+// ====================================================================
 app.get('/api/rules', async (req, res) => {
     try {
         const rules = await Rule.find();
@@ -58,19 +88,16 @@ app.get('/api/rules', async (req, res) => {
     }
 });
 
-// B. Create or update a bot rule
 app.post('/api/rules', async (req, res) => {
     try {
         const { keyword, replyText } = req.body;
         if (!keyword || !replyText) return res.status(400).json({ success: false, error: "Missing data" });
 
-        // If the keyword exists, update it. If not, create a new one!
         await Rule.findOneAndUpdate(
             { keyword: keyword.toLowerCase() }, 
             { replyText: replyText }, 
             { upsert: true, new: true }
         );
-        
         console.log(`🧠 Bot learned a new rule for: "${keyword}"`);
         return res.status(200).json({ success: true, message: "Rule saved to Brain!" });
     } catch (error) {
@@ -127,24 +154,13 @@ app.post('/webhook', async (req, res) => {
             const messageId = messageData.id;
 
             try {
-                // 1. Save incoming message
                 await Message.create({ whatsappId: messageId, fromNumber: String(from), body: msgBody, direction: 'incoming' });
 
-                // 2. 🧠 THE NEW BRAIN LOGIC: Search MongoDB for the exact keyword!
                 const cleanMessage = msgBody.toLowerCase();
                 const matchedRule = await Rule.findOne({ keyword: cleanMessage });
 
-                let replyText = "";
-                
-                if (matchedRule) {
-                    // We found a custom rule the business owner created!
-                    replyText = matchedRule.replyText;
-                } else {
-                    // Fallback if the bot doesn't know the answer yet
-                    replyText = `🤖 I'm sorry, I don't recognize the word "${msgBody}". \n\nPlease wait, and a human agent will assist you shortly!`;
-                }
+                let replyText = matchedRule ? matchedRule.replyText : `🤖 I'm sorry, I don't recognize the word "${msgBody}". \n\nPlease wait, and a human agent will assist you shortly!`;
 
-                // 3. Send and save outbound reply
                 const outboundId = await sendWhatsAppMessage(from, replyText);
                 await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: replyText, direction: 'outgoing' });
 

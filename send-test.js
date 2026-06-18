@@ -18,7 +18,7 @@ const payload = {
           id: "wamid.mockID123456789",
           timestamp: Math.floor(Date.now() / 1000).toString(),
           type: "text",
-          text: { body: "Ping" }
+          text: { body: "hours" }
         }]
       },
       field: "messages"
