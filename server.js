@@ -6,7 +6,7 @@ const { Server } = require('socket.io');
 
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
-const User = require('./models/user'); 
+const User = require('./models/user'); // Ensure this matches your filename exactly (user.js)
 
 const app = express();
 app.use(cors()); 
@@ -19,7 +19,7 @@ const io = new Server(server, {
 });
 
 const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI || "your_local_or_atlas_mongodb_connection_string_here";
+const MONGO_URI = process.env.MONGO_URI || "your_mongodb_connection_string_here";
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log("💾 Connected to MongoDB Atlas Cloud!"))
@@ -35,7 +35,7 @@ io.on('connection', (socket) => {
 });
 
 // ====================================================================
-// META API HELPERS (TEXT & BUTTONS)
+// META API HELPERS
 // ====================================================================
 async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
@@ -66,7 +66,6 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     }
 }
 
-// 🧠 NEW: Send Interactive Clickable Buttons
 async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
     const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
     const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
@@ -75,12 +74,11 @@ async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
 
     const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
     
-    // Map buttons to Meta's strict structure (Max 3 buttons)
     const formattedButtons = buttonsArray.slice(0, 3).map((btn, index) => ({
         type: "reply",
         reply: {
             id: btn.id || `btn_${index}`,
-            title: btn.title.substring(0, 20) // Meta enforces a 20 character limit
+            title: btn.title.substring(0, 20)
         }
     }));
 
@@ -172,7 +170,7 @@ app.post('/api/rules', async (req, res) => {
 });
 
 // ====================================================================
-// META WEBHOOK (UPGRADED FOR BUTTON CLICKS)
+// WEBHOOK (THE BOT BRAIN)
 // ====================================================================
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
@@ -193,26 +191,22 @@ app.post('/webhook', async (req, res) => {
             let msgBody = "";
             let buttonIdMatch = "";
 
-            // 🧠 1. Check if it's normal text OR a button click
             if (messageData.text) {
                 msgBody = messageData.text.body.trim();
             } else if (messageData.interactive && messageData.interactive.button_reply) {
-                msgBody = messageData.interactive.button_reply.title; // The visible text on the button
-                buttonIdMatch = messageData.interactive.button_reply.id; // The hidden backend ID
+                msgBody = messageData.interactive.button_reply.title;
+                buttonIdMatch = messageData.interactive.button_reply.id;
             }
 
             if (msgBody) {
                 try {
-                    // Save the user's incoming message to DB and push to Flutter
                     const incomingMsg = await Message.create({ whatsappId: messageId, fromNumber: String(from), body: msgBody, direction: 'incoming' });
                     io.emit('new_message', incomingMsg);
 
-                    // 🧠 2. Determine what they want (Prioritize button ID over text)
                     const lookupQuery = buttonIdMatch ? buttonIdMatch.toLowerCase() : msgBody.toLowerCase();
                     
-                    // 🧠 3. Interactive Menu Logic
-                    if (lookupQuery === 'hello' || lookupQuery === 'hi' || lookupQuery === 'menu') {
-                        const multiChoiceBody = "👋 Welcome to Wadhwa Plywood & Hardware! How can we help you today? Select an option below:";
+                    if (['hello', 'hi', 'menu'].includes(lookupQuery)) {
+                        const multiChoiceBody = "👋 Welcome to Wadhwa Plywood & Hardware! How can we help you?";
                         const buttonMenu = [
                             { id: "products", title: "📁 View Products" },
                             { id: "hours", title: "⏰ Store Hours" },
@@ -220,19 +214,18 @@ app.post('/webhook', async (req, res) => {
                         ];
 
                         const outboundId = await sendWhatsAppButtons(from, multiChoiceBody, buttonMenu);
-                        const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Button Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
+                        const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
                     } else {
-                        // 🧠 4. Fallback to Database Rules Engine
                         const matchedRule = await Rule.findOne({ keyword: lookupQuery });
-                        let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that command. Type "Menu" to see your options!`;
+                        let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
 
                         const outboundId = await sendWhatsAppMessage(from, replyText);
                         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: replyText, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
                     }
                 } catch (dbError) {
-                    console.error("❌ Webhook Pipeline Error:", dbError);
+                    console.error("❌ Webhook Error:", dbError);
                 }
             }
         }
@@ -242,4 +235,4 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
-server.listen(PORT, () => console.log("Server running smoothly with active WebSockets on port " + PORT));
+server.listen(PORT, () => console.log("Server running on port " + PORT));
