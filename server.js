@@ -498,7 +498,18 @@ app.post('/webhook', async (req, res) => {
                     } 
                     // Don't auto-reply to images/audio if there is no keyword match
                     else if (!msgBody.startsWith('[MEDIA:')) {
-                        const matchedRule = await Rule.findOne({ businessPhone: activeBusinessPhone, keyword: lookupQuery });
+                        // 🧠 UPGRADED BOT BRAIN: Check if the message CONTAINS the keyword
+                        const allRules = await Rule.find({ businessPhone: activeBusinessPhone });
+                        let matchedRule = null;
+                        
+                        // Loop through all rules for this business and check for a match
+                        for (let rule of allRules) {
+                            if (lookupQuery.includes(rule.keyword.toLowerCase())) {
+                                matchedRule = rule;
+                                break; // Stop looking once we find a match!
+                            }
+                        }
+
                         let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
                         const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
                         const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: replyText, direction: 'outgoing' });
