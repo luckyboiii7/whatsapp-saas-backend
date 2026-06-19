@@ -1,21 +1,20 @@
 const fetch = require('node-fetch');
 
-// Simulates a user clicking "View Products" from the Main Menu
-const mockPayload = {
+// This simulates a customer ordering 10 units, but you only have 5 in stock!
+const outOfStockCart = {
     "object": "whatsapp_business_account",
     "entry": [{
         "changes": [{
             "value": {
                 "messages": [{
                     "from": "919039744212",
-                    "id": "click_id_" + Date.now(),
-                    "type": "interactive",
-                    "interactive": {
-                        "type": "button_reply",
-                        "button_reply": {
-                            "id": "products", 
-                            "title": "📁 View Products"
-                        }
+                    "id": "cart_id_" + Date.now(),
+                    "type": "order",
+                    "order": {
+                        "catalog_id": "catalog_123",
+                        "product_items": [
+                            { "product_retailer_id": "fevicol_glue", "quantity": 10, "item_price": 100, "currency": "INR" } 
+                        ]
                     }
                 }]
             }
@@ -24,19 +23,18 @@ const mockPayload = {
 };
 
 async function test() {
-    // Make sure this points to your live Render backend
     const url = 'https://whatsapp-saas-backend-qv85.onrender.com/webhook';
-    console.log("🚀 Simulating 'View Products' Button Click...");
+    console.log("🚀 Simulating Over-Limit Cart Submission...");
 
     try {
         const response = await fetch(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(mockPayload)
+            body: JSON.stringify(outOfStockCart)
         });
 
         if (response.status === 200) {
-            console.log("✅ Webhook triggered! Check your Flutter dashboard to see the dynamic catalog.");
+            console.log("✅ Webhook triggered! Check your Flutter dashboard to see the Stock Error message.");
         } else {
             console.log("❌ Webhook failed with status:", response.status);
         }
