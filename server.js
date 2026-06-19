@@ -9,7 +9,7 @@ const Rule = require('./models/Rule');
 const User = require('./models/user'); 
 const BotStatus = require('./models/BotStatus'); 
 const Order = require('./models/Order'); 
-const Product = require('./models/Product'); // 📦 NEW: Catalog Database
+const Product = require('./models/Product'); // 📦 Catalog Database
 
 const app = express();
 app.use(cors()); 
@@ -78,7 +78,7 @@ async function sendWhatsAppMedia(toPhoneNumber, mediaType, mediaUrl, captionText
 }
 
 // ====================================================================
-// SAAS API ENDPOINTS
+// SAAS API ENDPOINTS (Bot, Orders, Catalog, Rules)
 // ====================================================================
 app.post('/api/bot/toggle', async (req, res) => {
     try {
@@ -124,10 +124,8 @@ app.post('/api/messages/send', async (req, res) => {
 });
 
 app.get('/api/rules', async (req, res) => {
-    try { return res.status(200).json({ success: true, data: await Rule.find() }); } 
-    catch (error) { return res.status(500).json({ success: false }); }
+    try { return res.status(200).json({ success: true, data: await Rule.find() }); } catch (error) { return res.status(500).json({ success: false }); }
 });
-
 app.post('/api/rules', async (req, res) => {
     try {
         await Rule.findOneAndUpdate({ keyword: req.body.keyword.toLowerCase() }, { replyText: req.body.replyText }, { upsert: true });
@@ -135,65 +133,40 @@ app.post('/api/rules', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// ORDERS MANAGEMENT APIs
 app.get('/api/orders', async (req, res) => {
-    try {
-        const orders = await Order.find().sort({ createdAt: -1 });
-        return res.status(200).json({ success: true, data: orders });
-    } catch (error) { return res.status(500).json({ success: false }); }
+    try { return res.status(200).json({ success: true, data: await Order.find().sort({ createdAt: -1 }) }); } catch (error) { return res.status(500).json({ success: false }); }
 });
-
 app.post('/api/orders/:id/send-invoice', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
-        order.totalAmount = req.body.newTotal;
-        order.status = 'pending_payment';
-        await order.save();
+        order.totalAmount = req.body.newTotal; order.status = 'pending_payment'; await order.save();
         io.emit('order_updated', order);
-        
         const replyText = `🧾 Good news! Your quotation is ready. With bulk adjustments, your final total is ₹${req.body.newTotal}. Click below to confirm and pay:`;
-        const buttons = [{ id: `pay_${order._id}`, title: "💳 Pay Now" }];
-        const outboundId = await sendWhatsAppButtons(order.customerPhone, replyText, buttons);
+        const outboundId = await sendWhatsAppButtons(order.customerPhone, replyText, [{ id: `pay_${order._id}`, title: "💳 Pay Now" }]);
         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Final Invoice: ₹${req.body.newTotal}]`, direction: 'outgoing' });
         io.emit('new_message', systemReply);
         return res.status(200).json({ success: true, data: order });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
-
 app.post('/api/orders/:id/mark-paid', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
-        order.status = 'paid';
-        await order.save();
-        io.emit('order_updated', order);
-        const replyText = `✅ Payment received! Your order is now confirmed and is being processed for dispatch. Thank you!`;
-        const outboundId = await sendWhatsAppMessage(order.customerPhone, replyText);
+        order.status = 'paid'; await order.save(); io.emit('order_updated', order);
+        const outboundId = await sendWhatsAppMessage(order.customerPhone, `✅ Payment received! Your order is now confirmed and is being processed for dispatch. Thank you!`);
         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Payment Receipt]`, direction: 'outgoing' });
         io.emit('new_message', systemReply);
         return res.status(200).json({ success: true, data: order });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 📦 NEW: CATALOG MANAGEMENT APIs
 app.get('/api/products', async (req, res) => {
-    try {
-        const products = await Product.find().sort({ createdAt: -1 });
-        return res.status(200).json({ success: true, data: products });
-    } catch (error) { return res.status(500).json({ success: false }); }
+    try { return res.status(200).json({ success: true, data: await Product.find().sort({ createdAt: -1 }) }); } catch (error) { return res.status(500).json({ success: false }); }
 });
-
 app.post('/api/products', async (req, res) => {
-    try {
-        const newProduct = await Product.create(req.body);
-        return res.status(201).json({ success: true, data: newProduct });
-    } catch (error) { return res.status(500).json({ success: false }); }
+    try { return res.status(201).json({ success: true, data: await Product.create(req.body) }); } catch (error) { return res.status(500).json({ success: false }); }
 });
-
 app.delete('/api/products/:id', async (req, res) => {
-    try {
-        await Product.findByIdAndDelete(req.params.id);
-        return res.status(200).json({ success: true });
-    } catch (error) { return res.status(500).json({ success: false }); }
+    try { await Product.findByIdAndDelete(req.params.id); return res.status(200).json({ success: true }); } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 // ====================================================================
@@ -216,24 +189,17 @@ app.post('/webhook', async (req, res) => {
             const botStatus = await BotStatus.findOne({ customerPhone: String(from) });
             const isPaused = botStatus && botStatus.isBotPaused;
 
+            // 🛒 SMART CART ENGINE
             if (messageData.type === 'order') {
                 const items = messageData.order.product_items;
-                let totalAmount = 0;
-                let requiresQuotation = false;
-                let formattedItems = [];
-
+                let totalAmount = 0; let requiresQuotation = false; let formattedItems = [];
                 items.forEach(item => {
-                    const price = item.item_price || 0; 
-                    const qty = item.quantity || 1;
-                    totalAmount += (price * qty);
-                    if (price === 0) requiresQuotation = true; 
+                    const price = item.item_price || 0; const qty = item.quantity || 1;
+                    totalAmount += (price * qty); if (price === 0) requiresQuotation = true; 
                     formattedItems.push({ name: item.product_retailer_id, quantity: qty, price: price });
                 });
-
                 const routingMode = requiresQuotation ? 'quotation' : 'instant_pay';
-
                 const newOrder = await Order.create({ customerPhone: String(from), items: formattedItems, totalAmount: totalAmount, routingMode: routingMode, status: requiresQuotation ? 'pending_quote' : 'pending_payment' });
-
                 io.emit('new_order', newOrder);
 
                 const cartSummary = `🛒 *Cart Received* | Mode: ${routingMode.toUpperCase()}\nItems: ${items.length}\nTotal: ₹${totalAmount}`;
@@ -243,8 +209,7 @@ app.post('/webhook', async (req, res) => {
                 if (isPaused) return res.status(200).send('EVENT_RECEIVED');
 
                 if (requiresQuotation) {
-                    const replyText = "🛒 We received your cart! Because it contains custom materials, we are calculating your bulk discount and final quotation. A human agent will message you shortly. 🛠️";
-                    const outboundId = await sendWhatsAppMessage(from, replyText);
+                    const outboundId = await sendWhatsAppMessage(from, "🛒 We received your cart! Because it contains custom materials, we are calculating your bulk discount and final quotation. A human agent will message you shortly. 🛠️");
                     const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Quotation Notice]`, direction: 'outgoing' });
                     io.emit('new_message', systemReply);
                 } else {
@@ -257,6 +222,7 @@ app.post('/webhook', async (req, res) => {
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
+            // TEXT & BUTTONS ENGINE
             let msgBody = messageData.text ? messageData.text.body.trim() : (messageData.interactive && messageData.interactive.button_reply ? messageData.interactive.button_reply.title : "");
             let buttonIdMatch = messageData.interactive && messageData.interactive.button_reply ? messageData.interactive.button_reply.id : "";
 
@@ -271,8 +237,7 @@ app.post('/webhook', async (req, res) => {
                     
                     if (lookupQuery.startsWith('pay_')) {
                         const orderId = lookupQuery.split('_')[1];
-                        const replyText = `Here is your secure payment link for Order #${orderId.substring(0,6)}: https://payment-gateway-placeholder.com/pay/${orderId}`;
-                        const outboundId = await sendWhatsAppMessage(from, replyText);
+                        const outboundId = await sendWhatsAppMessage(from, `Here is your secure payment link for Order #${orderId.substring(0,6)}: https://payment-gateway-placeholder.com/pay/${orderId}`);
                         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Payment Link]`, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
                         return res.status(200).send('EVENT_RECEIVED');
@@ -285,12 +250,27 @@ app.post('/webhook', async (req, res) => {
                         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
                     } 
+                    // 🧠 THE FINAL UPGRADE: DYNAMIC DATABASE CATALOG ROUTING
                     else if (lookupQuery === 'products') {
-                        const sampleImageUrl = "https://images.unsplash.com/photo-1533090161767-e6ffed986c88?w=800"; 
-                        const caption = "📁 Premium Commercial Plywood, Flush Doors, and Decorative Laminates stack available in stock!";
-                        const outboundId = await sendWhatsAppMedia(from, "image", sampleImageUrl, caption);
-                        const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Image Catalog]: ${caption}`, direction: 'outgoing' });
-                        io.emit('new_message', systemReply);
+                        const inventory = await Product.find().limit(10); // Fetch top 10 items from MongoDB
+                        
+                        if (inventory.length === 0) {
+                            const outboundId = await sendWhatsAppMessage(from, "Our catalog is currently being updated. Please check back later!");
+                            const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Catalog Empty Message Sent]`, direction: 'outgoing' });
+                            io.emit('new_message', systemReply);
+                        } else {
+                            // Construct a beautiful WhatsApp-friendly catalog message
+                            let catalogText = "📦 *Live Inventory Catalog:*\n\n";
+                            inventory.forEach((item, index) => {
+                                const priceDisplay = item.price === 0 ? "Ask for Quote 📝" : `₹${item.price}`;
+                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay}\n\n`;
+                            });
+                            catalogText += "🛒 *To order:* Simply reply with the items you need!";
+
+                            const outboundId = await sendWhatsAppMessage(from, catalogText);
+                            const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Sent Dynamic Catalog from DB]`, direction: 'outgoing' });
+                            io.emit('new_message', systemReply);
+                        }
                     } 
                     else {
                         const matchedRule = await Rule.findOne({ keyword: lookupQuery });
