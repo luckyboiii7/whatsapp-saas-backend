@@ -139,6 +139,35 @@ app.post('/api/register', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// 📸 NEW: API Proxy to Fetch Images & Audio from Meta
+app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
+    try {
+        const business = await User.findOne({ phoneNumber: req.params.businessPhone });
+        if (!business) return res.status(404).send('Business not found');
+
+        // Step 1: Tell Meta the ID, ask for the secure URL
+        const metaRes = await fetch(`https://graph.facebook.com/v20.0/${req.params.mediaId}`, {
+            headers: { 'Authorization': `Bearer ${business.metaToken}` }
+        });
+        const metaData = await metaRes.json();
+        if (!metaData.url) return res.status(404).send('Media not found');
+
+        // Step 2: Download the file using the secure URL and Token
+        const fileRes = await fetch(metaData.url, {
+            headers: { 'Authorization': `Bearer ${business.metaToken}` }
+        });
+        
+        const arrayBuffer = await fileRes.arrayBuffer();
+        const buffer = Buffer.from(arrayBuffer);
+        
+        res.setHeader('Content-Type', metaData.mime_type);
+        return res.send(buffer);
+    } catch (error) {
+        console.error("Media Fetch Error:", error);
+        return res.status(500).send('Error Fetching Media');
+    }
+});
+
 app.get('/api/contacts/:businessPhone', async (req, res) => {
     try {
         const contacts = await Message.aggregate([
@@ -329,13 +358,12 @@ app.post('/webhook', async (req, res) => {
     if (body.object === 'whatsapp_business_account') {
         if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
             
-            // 🏢 MULTI-TENANT MAGIC: Find out WHICH business received this message
             const businessPhoneId = body.entry[0].changes[0].value.metadata.phone_number_id;
             const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
             
             if (!businessUser) {
                 console.log("Message received for unregistered Phone ID:", businessPhoneId);
-                return res.status(200).send('EVENT_RECEIVED'); // Ignore it
+                return res.status(200).send('EVENT_RECEIVED'); 
             }
 
             const activeBusinessPhone = businessUser.phoneNumber;
@@ -407,9 +435,22 @@ app.post('/webhook', async (req, res) => {
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
-            // TEXT & BUTTONS ENGINE
-            let msgBody = messageData.text ? messageData.text.body.trim() : (messageData.interactive && messageData.interactive.button_reply ? messageData.interactive.button_reply.title : "");
-            let buttonIdMatch = messageData.interactive && messageData.interactive.button_reply ? messageData.interactive.button_reply.id : "";
+            // 📸 TEXT, BUTTONS & MEDIA ENGINE
+            let msgBody = "";
+            let buttonIdMatch = "";
+
+            if (messageData.text) {
+                msgBody = messageData.text.body.trim();
+            } else if (messageData.interactive && messageData.interactive.button_reply) {
+                msgBody = messageData.interactive.button_reply.title;
+                buttonIdMatch = messageData.interactive.button_reply.id;
+            } else if (messageData.type === 'image') {
+                msgBody = `[MEDIA:image:${messageData.image.id}]`;
+            } else if (messageData.type === 'audio') {
+                msgBody = `[MEDIA:audio:${messageData.audio.id}]`;
+            } else if (messageData.type === 'document') {
+                msgBody = `[MEDIA:document:${messageData.document.id}]`;
+            }
 
             if (msgBody) {
                 try {
@@ -455,7 +496,8 @@ app.post('/webhook', async (req, res) => {
                             io.to(activeBusinessPhone).emit('new_message', systemReply);
                         }
                     } 
-                    else {
+                    // Don't auto-reply to images/audio if there is no keyword match
+                    else if (!msgBody.startsWith('[MEDIA:')) {
                         const matchedRule = await Rule.findOne({ businessPhone: activeBusinessPhone, keyword: lookupQuery });
                         let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
                         const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
