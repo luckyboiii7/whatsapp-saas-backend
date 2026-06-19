@@ -257,6 +257,7 @@ app.get('/api/rules/:businessPhone', async (req, res) => {
 
 app.post('/api/rules', async (req, res) => {
     try {
+        // Keeps user's exact formatting (e.g. "hi, hello, namaste") so it can be split correctly later
         await Rule.findOneAndUpdate(
             { businessPhone: req.body.businessPhone, keyword: req.body.keyword.toLowerCase() }, 
             { replyText: req.body.replyText }, { upsert: true }
@@ -498,13 +499,17 @@ app.post('/webhook', async (req, res) => {
                     } 
                     // Don't auto-reply to images/audio if there is no keyword match
                     else if (!msgBody.startsWith('[MEDIA:')) {
-                        // 🧠 UPGRADED BOT BRAIN: Check if the message CONTAINS the keyword
+                        // 🧠 UPGRADED BOT BRAIN: Check for multiple comma-separated keywords
                         const allRules = await Rule.find({ businessPhone: activeBusinessPhone });
                         let matchedRule = null;
                         
-                        // Loop through all rules for this business and check for a match
+                        // Loop through all rules for this business
                         for (let rule of allRules) {
-                            if (lookupQuery.includes(rule.keyword.toLowerCase())) {
+                            // Split the rule's keyword by commas and trim spaces (e.g. "hi, hello, hey")
+                            const triggerWords = rule.keyword.split(',').map(w => w.trim().toLowerCase());
+                            
+                            // Check if ANY of the trigger words are inside the customer's message
+                            if (triggerWords.some(trigger => lookupQuery.includes(trigger))) {
                                 matchedRule = rule;
                                 break; // Stop looking once we find a match!
                             }
