@@ -3,6 +3,10 @@ const mongoose = require('mongoose');
 const cors = require('cors');
 const http = require('http'); 
 const { Server } = require('socket.io'); 
+const multer = require('multer'); // 📦 NEW: File uploader
+const fs = require('fs');         // 📦 NEW: File system tools
+const os = require('os');         // 📦 NEW: Operating system tools (for temp folder)
+const crypto = require('crypto'); // 🔐 NEW: For verifying Razorpay Webhooks
 
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
@@ -22,9 +26,12 @@ const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI || "your_mongodb_connection_string_here";
 
 // 💳 RAZORPAY KEYS (Test Mode)
-// In a real SaaS, these would be in your .env file!
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "rzp_test_placeholder_key"; 
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "placeholder_secret";
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "placeholder_webhook_secret";
+
+// 📂 MULTER SETUP: Save uploads straight to the temporary OS folder
+const upload = multer({ dest: os.tmpdir() });
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log("💾 Connected to MongoDB Atlas Cloud!"))
@@ -37,11 +44,10 @@ io.on('connection', (socket) => {
 });
 
 // ====================================================================
-// RAZORPAY HELPER (NEW)
+// RAZORPAY HELPER
 // ====================================================================
 async function generateRazorpayLink(amount, orderId, customerPhone) {
     if (RAZORPAY_KEY_ID === "rzp_test_placeholder_key") {
-        // Fallback if user hasn't put real keys yet
         return `https://razorpay.com/fake-demo-link/pay/${orderId}?amt=${amount}`;
     }
 
@@ -54,15 +60,16 @@ async function generateRazorpayLink(amount, orderId, customerPhone) {
                 'Content-Type': 'application/json' 
             },
             body: JSON.stringify({
-                amount: Math.round(amount * 100), // Razorpay needs amount in paise/cents
+                amount: Math.round(amount * 100), 
                 currency: "INR",
                 description: `Payment for Order #${orderId.substring(0, 6)}`,
                 customer: { contact: customerPhone },
-                notify: { sms: false, email: false }
+                notify: { sms: false, email: false },
+                notes: { order_id: orderId } // 🔐 CRITICAL: Hidden data for our Webhook to read later!
             })
         });
         const data = await response.json();
-        return data.short_url; // Returns a real link like https://rzp.io/i/xxxx
+        return data.short_url; 
     } catch (error) {
         console.error("Razorpay Error:", error);
         return null;
@@ -89,18 +96,13 @@ async function sendWhatsAppMessage(toPhoneNumber, messageText) {
     try {
         const response = await fetch(url, { 
             method: 'POST', 
-            headers: { 
-                'Authorization': `Bearer ${ACCESS_TOKEN}`, 
-                'Content-Type': 'application/json' 
-            }, 
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, 
             body: JSON.stringify(payload) 
         });
         const data = await response.json();
         if (response.ok) return data.messages[0].id;
         return null;
-    } catch (error) { 
-        return null; 
-    }
+    } catch (error) { return null; }
 }
 
 async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
@@ -129,18 +131,74 @@ async function sendWhatsAppButtons(toPhoneNumber, bodyText, buttonsArray) {
     try {
         const response = await fetch(url, { 
             method: 'POST', 
-            headers: { 
-                'Authorization': `Bearer ${ACCESS_TOKEN}`, 
-                'Content-Type': 'application/json' 
-            }, 
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, 
             body: JSON.stringify(payload) 
         });
         const data = await response.json();
         if (response.ok) return data.messages[0].id;
         return null;
-    } catch (error) { 
-        return null; 
+    } catch (error) { return null; }
+}
+
+// 📎 META MEDIA UPLOAD HELPER
+async function uploadMediaToWhatsApp(filePath, mimeType, originalName) {
+    const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
+    const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    if (!ACCESS_TOKEN) return null;
+
+    const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/media`;
+    
+    // Convert physical file to a Blob for Meta
+    const fileBuffer = fs.readFileSync(filePath);
+    const fileBlob = new Blob([fileBuffer], { type: mimeType });
+    
+    const formData = new FormData();
+    formData.append('file', fileBlob, originalName);
+    formData.append('messaging_product', 'whatsapp');
+
+    try {
+        const response = await fetch(url, {
+            method: 'POST',
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}` },
+            body: formData
+        });
+        const data = await response.json();
+        return data.id; // Meta gives us a Media ID to use!
+    } catch (error) {
+        console.error("Meta Media Upload Error:", error);
+        return null;
     }
+}
+
+// 📎 META MEDIA SEND HELPER
+async function sendWhatsAppMediaId(toPhoneNumber, mediaId, mediaType, caption = "", filename = "") {
+    const PHONE_NUMBER_ID = (process.env.PHONE_NUMBER_ID || "1212445375277979").trim();
+    const ACCESS_TOKEN = (process.env.WHATSAPP_ACCESS_TOKEN || "").trim();
+    if (!ACCESS_TOKEN) return null;
+
+    const url = `https://graph.facebook.com/v20.0/${PHONE_NUMBER_ID}/messages`;
+    
+    const payload = { 
+        messaging_product: "whatsapp", 
+        recipient_type: "individual", 
+        to: toPhoneNumber, 
+        type: mediaType, // 'image' or 'document'
+        [mediaType]: { id: mediaId } 
+    };
+
+    if (caption) payload[mediaType].caption = caption;
+    if (mediaType === 'document' && filename) payload.document.filename = filename;
+
+    try {
+        const response = await fetch(url, { 
+            method: 'POST', 
+            headers: { 'Authorization': `Bearer ${ACCESS_TOKEN}`, 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(payload) 
+        });
+        const data = await response.json();
+        if (response.ok) return data.messages[0].id;
+        return null;
+    } catch (error) { return null; }
 }
 
 // ====================================================================
@@ -165,43 +223,31 @@ app.post('/api/bot/toggle', async (req, res) => {
         );
         io.emit('bot_status_changed', status);
         return res.status(200).json({ success: true, data: status });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/bot/status/:phone', async (req, res) => {
     try {
         const status = await BotStatus.findOne({ customerPhone: String(req.params.phone) });
         return res.status(200).json({ success: true, isBotPaused: status ? status.isBotPaused : false });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/register', async (req, res) => {
     try {
         let user = await User.findOne({ phoneNumber: String(req.body.phoneNumber) });
-        if (user) {
-            return res.status(200).json({ success: true, message: "Welcome back!", user });
-        }
-        user = await User.create({ 
-            businessName: req.body.businessName, 
-            phoneNumber: String(req.body.phoneNumber) 
-        });
+        if (user) return res.status(200).json({ success: true, message: "Welcome back!", user });
+        
+        user = await User.create({ businessName: req.body.businessName, phoneNumber: String(req.body.phoneNumber) });
         return res.status(201).json({ success: true, message: "Account created!", user });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/messages/:phone', async (req, res) => {
     try {
         const chatHistory = await Message.find({ fromNumber: String(req.params.phone) }).sort({ timestamp: 1 });
         return res.status(200).json({ success: true, data: chatHistory });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/messages/send', async (req, res) => {
@@ -209,16 +255,52 @@ app.post('/api/messages/send', async (req, res) => {
         const outboundId = await sendWhatsAppMessage(req.body.phoneNumber, req.body.message);
         if (outboundId) {
             const newMsg = await Message.create({ 
-                whatsappId: outboundId, 
-                fromNumber: String(req.body.phoneNumber), 
-                body: req.body.message, 
-                direction: 'outgoing' 
+                whatsappId: outboundId, fromNumber: String(req.body.phoneNumber), 
+                body: req.body.message, direction: 'outgoing' 
             });
             io.to(req.body.phoneNumber).emit('new_message', newMsg);
             return res.status(200).json({ success: true });
         }
         return res.status(500).json({ success: false });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// 📎 UPLOAD & SEND MEDIA ENDPOINT
+app.post('/api/messages/send-media', upload.single('file'), async (req, res) => {
+    try {
+        const { phoneNumber, caption } = req.body;
+        const file = req.file;
+
+        if (!file) return res.status(400).json({ success: false, message: "No file provided" });
+
+        const isImage = file.mimetype.startsWith('image/');
+        const mediaType = isImage ? 'image' : 'document';
+
+        // 1. Upload directly to Meta
+        const mediaId = await uploadMediaToWhatsApp(file.path, file.mimetype, file.originalname);
+        
+        // 2. 🧹 ZERO COST TRICK: Instantly delete local file!
+        fs.unlinkSync(file.path);
+
+        if (!mediaId) return res.status(500).json({ success: false, message: "Failed to upload to Meta" });
+
+        // 3. Send using the Media ID
+        const outboundId = await sendWhatsAppMediaId(phoneNumber, mediaId, mediaType, caption, file.originalname);
+
+        if (outboundId) {
+            const newMsg = await Message.create({ 
+                whatsappId: outboundId, 
+                fromNumber: String(phoneNumber), 
+                body: `[Sent ${isImage ? 'Image' : 'Document'}: ${file.originalname}] ${caption ? '- ' + caption : ''}`, 
+                direction: 'outgoing' 
+            });
+            io.to(phoneNumber).emit('new_message', newMsg);
+            return res.status(200).json({ success: true });
+        }
+
+        return res.status(500).json({ success: false });
     } catch (error) { 
+        console.error(error);
         return res.status(500).json({ success: false }); 
     }
 });
@@ -227,61 +309,47 @@ app.get('/api/rules', async (req, res) => {
     try { 
         const rules = await Rule.find();
         return res.status(200).json({ success: true, data: rules }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/rules', async (req, res) => {
     try {
         await Rule.findOneAndUpdate(
             { keyword: req.body.keyword.toLowerCase() }, 
-            { replyText: req.body.replyText }, 
-            { upsert: true }
+            { replyText: req.body.replyText }, { upsert: true }
         );
         return res.status(200).json({ success: true });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/products', async (req, res) => {
     try { 
         const products = await Product.find().sort({ createdAt: -1 });
         return res.status(200).json({ success: true, data: products }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/products', async (req, res) => {
     try { 
         const newProduct = await Product.create(req.body);
         return res.status(201).json({ success: true, data: newProduct }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.delete('/api/products/:id', async (req, res) => {
     try { 
         await Product.findByIdAndDelete(req.params.id); 
         return res.status(200).json({ success: true }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/orders', async (req, res) => {
     try {
         const orders = await Order.find().sort({ createdAt: -1 });
         return res.status(200).json({ success: true, data: orders });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💳 UPDATED: Send Invoice now triggers Razorpay!
 app.post('/api/orders/:id/send-invoice', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
@@ -290,9 +358,7 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         await order.save();
         io.emit('order_updated', order);
         
-        // Generate actual Razorpay payment link
         const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone);
-        
         const replyText = `🧾 Good news! Your custom quotation is ready.\n\nYour final total is ₹${req.body.newTotal}.\n\nSecure Payment Link:\n${paymentLink}`;
         const outboundId = await sendWhatsAppMessage(order.customerPhone, replyText);
         
@@ -304,11 +370,10 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         });
         io.emit('new_message', systemReply);
         return res.status(200).json({ success: true, data: order });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// Manual force payment marking (Admin tool)
 app.post('/api/orders/:id/mark-paid', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
@@ -316,7 +381,6 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
         await order.save(); 
         io.emit('order_updated', order);
         
-        // AUTO-DEDUCT INVENTORY
         for (let item of order.items) {
             await Product.findOneAndUpdate(
                 { name: item.name }, 
@@ -334,8 +398,56 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
         });
         io.emit('new_message', systemReply);
         return res.status(200).json({ success: true, data: order });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// ====================================================================
+// 💳 RAZORPAY WEBHOOK (AUTO-MARK ORDERS AS PAID)
+// ====================================================================
+app.post('/razorpay-webhook', async (req, res) => {
+    try {
+        const signature = req.headers['x-razorpay-signature'];
+        const body = JSON.stringify(req.body);
+        const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
+                                        .update(body)
+                                        .digest('hex');
+
+        if (expectedSignature !== signature) {
+            return res.status(400).send('Invalid signature');
+        }
+
+        // Razorpay confirms payment is successful!
+        if (req.body.event === 'payment_link.paid') {
+            const paymentEntity = req.body.payload.payment_link.entity;
+            const orderId = paymentEntity.notes.order_id; // Retrieve hidden ID!
+
+            const order = await Order.findById(orderId);
+            if (order && order.status !== 'paid') {
+                order.status = 'paid';
+                await order.save();
+                io.emit('order_updated', order); // Instantly update frontend dashboard!
+                
+                // Deduct stock automatically
+                for (let item of order.items) {
+                    await Product.findOneAndUpdate({ name: item.name }, { $inc: { stockQuantity: -item.quantity } });
+                }
+
+                // Send WhatsApp Receipt automatically
+                const outboundId = await sendWhatsAppMessage(order.customerPhone, `✅ Payment of ₹${order.totalAmount} received automatically via Razorpay! Your order is now confirmed and being processed.`);
+                
+                const systemReply = await Message.create({ 
+                    whatsappId: outboundId || `reply-${Date.now()}`, 
+                    fromNumber: order.customerPhone, 
+                    body: `[Sent Automated Payment Receipt]`, 
+                    direction: 'outgoing' 
+                });
+                io.emit('new_message', systemReply);
+            }
+        }
+        res.status(200).send('OK');
+    } catch (e) {
+        console.error("Webhook Error:", e);
+        res.status(500).send('Webhook Error');
     }
 });
 
@@ -362,7 +474,7 @@ app.post('/webhook', async (req, res) => {
             const botStatus = await BotStatus.findOne({ customerPhone: String(from) });
             const isPaused = botStatus && botStatus.isBotPaused;
 
-            // 🛒 SMART CART ENGINE WITH STOCK GUARDRAILS
+            // 🛒 SMART CART ENGINE
             if (messageData.type === 'order') {
                 const items = messageData.order.product_items;
                 let totalAmount = 0; 
@@ -383,13 +495,10 @@ app.post('/webhook', async (req, res) => {
                     if (price === 0) requiresQuotation = true; 
                     
                     formattedItems.push({ 
-                        name: item.product_retailer_id, 
-                        quantity: qty, 
-                        price: price 
+                        name: item.product_retailer_id, quantity: qty, price: price 
                     });
                 }
 
-                // Reject if out of stock
                 if (stockErrorMsg !== "") {
                     const replyText = `⚠️ *Order Cannot Be Processed*\n\nSome items in your cart are out of stock:\n${stockErrorMsg}\nPlease adjust your cart and try sending again.`;
                     const outboundId = await sendWhatsAppMessage(from, replyText);
@@ -397,8 +506,7 @@ app.post('/webhook', async (req, res) => {
                     const systemReply = await Message.create({ 
                         whatsappId: outboundId || `reply-${messageId}`, 
                         fromNumber: String(from), 
-                        body: `[Rejected Cart: Stock Limit Reached]`, 
-                        direction: 'outgoing' 
+                        body: `[Rejected Cart: Stock Limit Reached]`, direction: 'outgoing' 
                     });
                     io.emit('new_message', systemReply);
                     return res.status(200).send('EVENT_RECEIVED');
@@ -406,20 +514,15 @@ app.post('/webhook', async (req, res) => {
 
                 const routingMode = requiresQuotation ? 'quotation' : 'instant_pay';
                 const newOrder = await Order.create({ 
-                    customerPhone: String(from), 
-                    items: formattedItems, 
-                    totalAmount: totalAmount, 
-                    routingMode: routingMode, 
+                    customerPhone: String(from), items: formattedItems, 
+                    totalAmount: totalAmount, routingMode: routingMode, 
                     status: requiresQuotation ? 'pending_quote' : 'pending_payment' 
                 });
                 io.emit('new_order', newOrder);
 
                 const cartSummary = `🛒 *Cart Received* | Mode: ${routingMode.toUpperCase()}\nItems: ${items.length}\nTotal: ₹${totalAmount}`;
                 const incomingMsg = await Message.create({ 
-                    whatsappId: messageId, 
-                    fromNumber: String(from), 
-                    body: cartSummary, 
-                    direction: 'incoming' 
+                    whatsappId: messageId, fromNumber: String(from), body: cartSummary, direction: 'incoming' 
                 });
                 io.emit('new_message', incomingMsg);
 
@@ -427,12 +530,9 @@ app.post('/webhook', async (req, res) => {
 
                 if (requiresQuotation) {
                     const outboundId = await sendWhatsAppMessage(from, "🛒 We received your cart! Because it contains custom materials, we are calculating your bulk discount and final quotation. A human agent will message you shortly. 🛠️");
-                    
                     const systemReply = await Message.create({ 
-                        whatsappId: outboundId || `reply-${messageId}`, 
-                        fromNumber: String(from), 
-                        body: `[Sent Quotation Notice]`, 
-                        direction: 'outgoing' 
+                        whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                        body: `[Sent Quotation Notice]`, direction: 'outgoing' 
                     });
                     io.emit('new_message', systemReply);
                 } else {
@@ -444,10 +544,8 @@ app.post('/webhook', async (req, res) => {
                     const outboundId = await sendWhatsAppButtons(from, replyText, buttons);
                     
                     const systemReply = await Message.create({ 
-                        whatsappId: outboundId || `reply-${messageId}`, 
-                        fromNumber: String(from), 
-                        body: `[Sent Payment Options for ₹${totalAmount}]`, 
-                        direction: 'outgoing' 
+                        whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                        body: `[Sent Payment Options for ₹${totalAmount}]`, direction: 'outgoing' 
                     });
                     io.emit('new_message', systemReply);
                 }
@@ -461,10 +559,7 @@ app.post('/webhook', async (req, res) => {
             if (msgBody) {
                 try {
                     const incomingMsg = await Message.create({ 
-                        whatsappId: messageId, 
-                        fromNumber: String(from), 
-                        body: msgBody, 
-                        direction: 'incoming' 
+                        whatsappId: messageId, fromNumber: String(from), body: msgBody, direction: 'incoming' 
                     });
                     io.emit('new_message', incomingMsg);
 
@@ -472,21 +567,16 @@ app.post('/webhook', async (req, res) => {
 
                     const lookupQuery = buttonIdMatch ? buttonIdMatch.toLowerCase() : msgBody.toLowerCase();
                     
-                    // 💳 UPDATED: User clicks "Pay Now" bot generates Razorpay Link
                     if (lookupQuery.startsWith('pay_')) {
                         const parts = lookupQuery.split('_');
                         const orderId = parts[1];
                         const amount = parts[2];
                         
                         const paymentLink = await generateRazorpayLink(amount, orderId, from);
-
                         const outboundId = await sendWhatsAppMessage(from, `Here is your secure payment link for Order #${orderId.substring(0,6)}: \n\n${paymentLink}`);
-                        
                         const systemReply = await Message.create({ 
-                            whatsappId: outboundId || `reply-${messageId}`, 
-                            fromNumber: String(from), 
-                            body: `[Sent Secure Payment Link]`, 
-                            direction: 'outgoing' 
+                            whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                            body: `[Sent Secure Payment Link]`, direction: 'outgoing' 
                         });
                         io.emit('new_message', systemReply);
                         return res.status(200).send('EVENT_RECEIVED');
@@ -500,12 +590,9 @@ app.post('/webhook', async (req, res) => {
                             { id: "contact", title: "👨‍💻 Speak to Human" }
                         ];
                         const outboundId = await sendWhatsAppButtons(from, multiChoiceBody, buttonMenu);
-                        
                         const systemReply = await Message.create({ 
-                            whatsappId: outboundId || `reply-${messageId}`, 
-                            fromNumber: String(from), 
-                            body: `[Menu]: ${multiChoiceBody}`, 
-                            direction: 'outgoing' 
+                            whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                            body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' 
                         });
                         io.emit('new_message', systemReply);
                     } 
@@ -514,12 +601,9 @@ app.post('/webhook', async (req, res) => {
                         
                         if (inventory.length === 0) {
                             const outboundId = await sendWhatsAppMessage(from, "Our catalog is currently being updated. Please check back later!");
-                            
                             const systemReply = await Message.create({ 
-                                whatsappId: outboundId || `reply-${messageId}`, 
-                                fromNumber: String(from), 
-                                body: `[Catalog Empty Message Sent]`, 
-                                direction: 'outgoing' 
+                                whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                                body: `[Catalog Empty Message Sent]`, direction: 'outgoing' 
                             });
                             io.emit('new_message', systemReply);
                         } else {
@@ -529,14 +613,10 @@ app.post('/webhook', async (req, res) => {
                                 catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.stockQuantity}\n\n`;
                             });
                             catalogText += "🛒 *To order:* Simply reply with the items you need!";
-
                             const outboundId = await sendWhatsAppMessage(from, catalogText);
-                            
                             const systemReply = await Message.create({ 
-                                whatsappId: outboundId || `reply-${messageId}`, 
-                                fromNumber: String(from), 
-                                body: `[Sent Dynamic Catalog from DB]`, 
-                                direction: 'outgoing' 
+                                whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                                body: `[Sent Dynamic Catalog from DB]`, direction: 'outgoing' 
                             });
                             io.emit('new_message', systemReply);
                         }
@@ -544,20 +624,14 @@ app.post('/webhook', async (req, res) => {
                     else {
                         const matchedRule = await Rule.findOne({ keyword: lookupQuery });
                         let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
-                        
                         const outboundId = await sendWhatsAppMessage(from, replyText);
-                        
                         const systemReply = await Message.create({ 
-                            whatsappId: outboundId || `reply-${messageId}`, 
-                            fromNumber: String(from), 
-                            body: replyText, 
-                            direction: 'outgoing' 
+                            whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), 
+                            body: replyText, direction: 'outgoing' 
                         });
                         io.emit('new_message', systemReply);
                     }
-                } catch (dbError) { 
-                    console.error("❌ Webhook Error:", dbError); 
-                }
+                } catch (dbError) { console.error("❌ Webhook Error:", dbError); }
             }
         }
         return res.status(200).send('EVENT_RECEIVED');
