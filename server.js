@@ -9,7 +9,7 @@ const Rule = require('./models/Rule');
 const User = require('./models/user'); 
 const BotStatus = require('./models/BotStatus'); 
 const Order = require('./models/Order'); 
-const Product = require('./models/Product'); // 📦 Catalog Database
+const Product = require('./models/Product'); 
 
 const app = express();
 app.use(cors()); 
@@ -78,13 +78,12 @@ async function sendWhatsAppMedia(toPhoneNumber, mediaType, mediaUrl, captionText
 }
 
 // ====================================================================
-// SAAS API ENDPOINTS (Bot, Orders, Catalog, Rules)
+// SAAS API ENDPOINTS
 // ====================================================================
 app.post('/api/bot/toggle', async (req, res) => {
     try {
         const status = await BotStatus.findOneAndUpdate({ customerPhone: String(req.body.customerPhone) }, { isBotPaused: req.body.isBotPaused, updatedAt: Date.now() }, { upsert: true, new: true });
-        io.emit('bot_status_changed', status);
-        return res.status(200).json({ success: true, data: status });
+        io.emit('bot_status_changed', status); return res.status(200).json({ success: true, data: status });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
@@ -136,6 +135,7 @@ app.post('/api/rules', async (req, res) => {
 app.get('/api/orders', async (req, res) => {
     try { return res.status(200).json({ success: true, data: await Order.find().sort({ createdAt: -1 }) }); } catch (error) { return res.status(500).json({ success: false }); }
 });
+
 app.post('/api/orders/:id/send-invoice', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
@@ -148,10 +148,20 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         return res.status(200).json({ success: true, data: order });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
+
 app.post('/api/orders/:id/mark-paid', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
         order.status = 'paid'; await order.save(); io.emit('order_updated', order);
+        
+        // 📦 NEW: AUTO-DEDUCT INVENTORY ON PAYMENT
+        for (let item of order.items) {
+            await Product.findOneAndUpdate(
+                { name: item.name },
+                { $inc: { stockQuantity: -item.quantity } } 
+            );
+        }
+
         const outboundId = await sendWhatsAppMessage(order.customerPhone, `✅ Payment received! Your order is now confirmed and is being processed for dispatch. Thank you!`);
         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Payment Receipt]`, direction: 'outgoing' });
         io.emit('new_message', systemReply);
@@ -189,15 +199,37 @@ app.post('/webhook', async (req, res) => {
             const botStatus = await BotStatus.findOne({ customerPhone: String(from) });
             const isPaused = botStatus && botStatus.isBotPaused;
 
-            // 🛒 SMART CART ENGINE
+            // 🛒 SMART CART ENGINE WITH STOCK GUARDRAILS
             if (messageData.type === 'order') {
                 const items = messageData.order.product_items;
                 let totalAmount = 0; let requiresQuotation = false; let formattedItems = [];
-                items.forEach(item => {
-                    const price = item.item_price || 0; const qty = item.quantity || 1;
-                    totalAmount += (price * qty); if (price === 0) requiresQuotation = true; 
+                let stockErrorMsg = ""; // 📦 Track items that are out of stock
+
+                // First pass: Verify stock levels
+                for (let item of items) {
+                    const price = item.item_price || 0; 
+                    const qty = item.quantity || 1;
+                    
+                    const dbProduct = await Product.findOne({ name: item.product_retailer_id });
+                    if (dbProduct && qty > dbProduct.stockQuantity) {
+                        stockErrorMsg += `❌ *${item.product_retailer_id}* (You ordered ${qty}, but we only have ${dbProduct.stockQuantity} left!)\n`;
+                    }
+                    
+                    totalAmount += (price * qty); 
+                    if (price === 0) requiresQuotation = true; 
                     formattedItems.push({ name: item.product_retailer_id, quantity: qty, price: price });
-                });
+                }
+
+                // 🛑 If there is a stock issue, reject the cart entirely!
+                if (stockErrorMsg !== "") {
+                    const replyText = `⚠️ *Order Cannot Be Processed*\n\nSome items in your cart are out of stock:\n${stockErrorMsg}\nPlease adjust your cart and try sending again.`;
+                    const outboundId = await sendWhatsAppMessage(from, replyText);
+                    const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Rejected Cart: Stock Limit Reached]`, direction: 'outgoing' });
+                    io.emit('new_message', systemReply);
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
+
+                // If stock is fine, process order normally
                 const routingMode = requiresQuotation ? 'quotation' : 'instant_pay';
                 const newOrder = await Order.create({ customerPhone: String(from), items: formattedItems, totalAmount: totalAmount, routingMode: routingMode, status: requiresQuotation ? 'pending_quote' : 'pending_payment' });
                 io.emit('new_order', newOrder);
@@ -250,20 +282,18 @@ app.post('/webhook', async (req, res) => {
                         const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
                         io.emit('new_message', systemReply);
                     } 
-                    // 🧠 THE FINAL UPGRADE: DYNAMIC DATABASE CATALOG ROUTING
                     else if (lookupQuery === 'products') {
-                        const inventory = await Product.find().limit(10); // Fetch top 10 items from MongoDB
+                        const inventory = await Product.find().limit(10); 
                         
                         if (inventory.length === 0) {
                             const outboundId = await sendWhatsAppMessage(from, "Our catalog is currently being updated. Please check back later!");
                             const systemReply = await Message.create({ whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), body: `[Catalog Empty Message Sent]`, direction: 'outgoing' });
                             io.emit('new_message', systemReply);
                         } else {
-                            // Construct a beautiful WhatsApp-friendly catalog message
                             let catalogText = "📦 *Live Inventory Catalog:*\n\n";
                             inventory.forEach((item, index) => {
                                 const priceDisplay = item.price === 0 ? "Ask for Quote 📝" : `₹${item.price}`;
-                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay}\n\n`;
+                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.stockQuantity}\n\n`;
                             });
                             catalogText += "🛒 *To order:* Simply reply with the items you need!";
 
