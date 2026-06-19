@@ -1,7 +1,8 @@
 const mongoose = require('mongoose');
 
 const BotStatusSchema = new mongoose.Schema({
-    customerPhone: { type: String, required: true, unique: true },
+    businessPhone: { type: String, required: true }, // 🏢 SaaS Tenant ID
+    customerPhone: { type: String, required: true },
     isBotPaused: { type: Boolean, default: false },
     updatedAt: { type: Date, default: Date.now }
 });
