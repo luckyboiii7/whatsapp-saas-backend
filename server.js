@@ -613,4 +613,4 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
-server.listen(PORT, () => console.log("Server running on port " + PORT));
+server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V2 OTP SECURE LIVE]"));
