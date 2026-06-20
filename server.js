@@ -42,7 +42,7 @@ io.on('connection', (socket) => {
 });
 
 // ====================================================================
-// RAZORPAY HELPER
+// CORE HELPER FUNCTIONS
 // ====================================================================
 async function generateRazorpayLink(amount, orderId, customerPhone) {
     if (RAZORPAY_KEY_ID === "rzp_test_placeholder_key") return `https://razorpay.com/fake-demo-link/pay/${orderId}?amt=${amount}`;
@@ -64,9 +64,6 @@ async function generateRazorpayLink(amount, orderId, customerPhone) {
     } catch (error) { return null; }
 }
 
-// ====================================================================
-// DYNAMIC META API HELPERS (Requires Keys per Business)
-// ====================================================================
 async function sendWhatsAppMessage(metaPhoneId, metaToken, toPhoneNumber, messageText) {
     if (!metaToken || !metaPhoneId) return null;
     const url = `https://graph.facebook.com/v20.0/${metaPhoneId}/messages`;
@@ -78,6 +75,109 @@ async function sendWhatsAppMessage(metaPhoneId, metaToken, toPhoneNumber, messag
         return null;
     } catch (error) { return null; }
 }
+
+async function validateMetaKeys(phoneId, token) {
+    try {
+        const response = await fetch(`https://graph.facebook.com/v20.0/${phoneId}`, { headers: { 'Authorization': `Bearer ${token}` } });
+        const data = await response.json();
+        return !data.error; 
+    } catch (e) { return false; }
+}
+
+// 🛡️ NEW: Unified OTP Dispatcher (Email vs WhatsApp)
+async function handleOtpDispatch(user, deliveryMethod) {
+    const otp = Math.floor(1000 + Math.random() * 9000).toString(); // Generates 4 digit pin
+    user.otpCode = otp;
+    user.otpExpires = new Date(Date.now() + 10 * 60000); // Valid for 10 mins
+    await user.save();
+
+    if (deliveryMethod === 'email') {
+        // Simulated Email sent to Render Logs!
+        console.log(`\n\n📧 [MOCK EMAIL SENT] To: ${user.adminEmail} | OTP CODE: ${otp}\n\n`);
+    } else {
+        // Sends Real WhatsApp message to their Personal Number using their Business Keys!
+        const msg = `🔐 *Security Alert*\nYour WhatsApp SaaS OTP is: *${otp}*.\nDo not share this with anyone. Valid for 10 mins.`;
+        await sendWhatsAppMessage(user.metaPhoneId, user.metaToken, user.adminPersonalPhone, msg);
+        console.log(`\n\n📱 [WHATSAPP OTP INITIATED] To: ${user.adminPersonalPhone} | OTP CODE: ${otp}\n\n`);
+    }
+    return true;
+}
+
+// ====================================================================
+// MULTI-TENANT SAAS API ENDPOINTS (AUTHENTICATION)
+// ====================================================================
+
+// 🔐 REGISTER
+app.post('/api/register', async (req, res) => {
+    try {
+        const { businessName, phoneNumber, password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone } = req.body;
+
+        let user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        if (user) return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
+
+        const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
+        if (!keysValid) return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
+
+        user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone });
+        return res.status(201).json({ success: true, message: "Account securely created!", user });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+});
+
+// 🔐 LOGIN STEP 1 (Check Password & Send OTP)
+app.post('/api/login', async (req, res) => {
+    try {
+        const { phoneNumber, password, deliveryMethod } = req.body;
+        const user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+        if (user.password !== password) return res.status(401).json({ success: false, message: "Incorrect password." });
+
+        await handleOtpDispatch(user, deliveryMethod);
+        return res.status(200).json({ success: true, requiresOtp: true, message: "OTP Sent" });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+});
+
+// 🔐 FORGOT PASSWORD STEP 1 (No Password Check, Just Send OTP)
+app.post('/api/forgot-password', async (req, res) => {
+    try {
+        const { phoneNumber, deliveryMethod } = req.body;
+        const user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+
+        await handleOtpDispatch(user, deliveryMethod);
+        return res.status(200).json({ success: true, message: "OTP Sent" });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+});
+
+// 🔐 OTP VERIFICATION (Used for both Login & Resetting Password)
+app.post('/api/verify-otp', async (req, res) => {
+    try {
+        const { phoneNumber, otp, newPassword } = req.body;
+        const user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+        
+        if (!user.otpCode || user.otpCode !== otp) {
+            return res.status(400).json({ success: false, message: "Invalid OTP." });
+        }
+        if (user.otpExpires < new Date()) {
+            return res.status(400).json({ success: false, message: "OTP expired. Please try again." });
+        }
+
+        user.otpCode = undefined;
+        user.otpExpires = undefined;
+
+        if (newPassword) user.password = newPassword;
+        
+        await user.save();
+        return res.status(200).json({ success: true, message: "Verified successfully!", user });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+});
+
+// ====================================================================
+// OTHER ENDPOINTS & WEBHOOK LOGIC
+// ====================================================================
 
 async function sendWhatsAppButtons(metaPhoneId, metaToken, toPhoneNumber, bodyText, buttonsArray) {
     if (!metaToken || !metaPhoneId || buttonsArray.length === 0) return null;
@@ -121,76 +221,16 @@ async function sendWhatsAppMediaId(metaPhoneId, metaToken, toPhoneNumber, mediaI
     } catch (error) { return null; }
 }
 
-// 🛡️ NEW: Function to live-test Meta Keys before saving
-async function validateMetaKeys(phoneId, token) {
-    try {
-        const response = await fetch(`https://graph.facebook.com/v20.0/${phoneId}`, {
-            headers: { 'Authorization': `Bearer ${token}` }
-        });
-        const data = await response.json();
-        // If Meta returns an error object, the keys are fake or expired!
-        return !data.error; 
-    } catch (e) { return false; }
-}
-
-// ====================================================================
-// MULTI-TENANT SAAS API ENDPOINTS
-// ====================================================================
-
-// 🔐 UPDATED: Secure Registration with Key Validation and Password
-app.post('/api/register', async (req, res) => {
-    try {
-        const { businessName, phoneNumber, password, metaPhoneId, metaToken } = req.body;
-
-        // 1. Ensure no duplicate accounts
-        let user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        if (user) {
-            return res.status(400).json({ success: false, message: "Phone number already registered. Please go to Login." });
-        }
-
-        // 2. The Shield: Ping Meta to verify keys!
-        const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
-        if (!keysValid) {
-            return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
-        }
-
-        // 3. Create Secure Account
-        user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken });
-        return res.status(201).json({ success: true, message: "Account securely created!", user });
-    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
-});
-
-// 🔐 NEW: Dedicated Login Route
-app.post('/api/login', async (req, res) => {
-    try {
-        const { phoneNumber, password } = req.body;
-        const user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        
-        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
-        if (user.password !== password) return res.status(401).json({ success: false, message: "Incorrect password." });
-
-        return res.status(200).json({ success: true, message: "Welcome back!", user });
-    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
-});
-
-// 📸 NEW: API Proxy to Fetch Images & Audio from Meta
 app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
     try {
         const business = await User.findOne({ phoneNumber: req.params.businessPhone });
         if (!business) return res.status(404).send('Business not found');
 
-        // Step 1: Tell Meta the ID, ask for the secure URL
-        const metaRes = await fetch(`https://graph.facebook.com/v20.0/${req.params.mediaId}`, {
-            headers: { 'Authorization': `Bearer ${business.metaToken}` }
-        });
+        const metaRes = await fetch(`https://graph.facebook.com/v20.0/${req.params.mediaId}`, { headers: { 'Authorization': `Bearer ${business.metaToken}` }});
         const metaData = await metaRes.json();
         if (!metaData.url) return res.status(404).send('Media not found');
 
-        // Step 2: Download the file using the secure URL and Token
-        const fileRes = await fetch(metaData.url, {
-            headers: { 'Authorization': `Bearer ${business.metaToken}` }
-        });
-        
+        const fileRes = await fetch(metaData.url, { headers: { 'Authorization': `Bearer ${business.metaToken}` }});
         const arrayBuffer = await fileRes.arrayBuffer();
         const buffer = Buffer.from(arrayBuffer);
         
@@ -377,9 +417,6 @@ app.post('/razorpay-webhook', async (req, res) => {
     } catch (e) { res.status(500).send('Webhook Error'); }
 });
 
-// ====================================================================
-// WEBHOOK (THE DYNAMIC MULTI-TENANT BOT BRAIN)
-// ====================================================================
 app.get('/webhook', (req, res) => {
     const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
     if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) return res.status(200).send(req.query['hub.challenge']);
@@ -415,7 +452,6 @@ app.post('/webhook', async (req, res) => {
             const botStatus = await BotStatus.findOne({ businessPhone: activeBusinessPhone, customerPhone: String(from) });
             const isPaused = botStatus && botStatus.isBotPaused;
 
-            // 🛒 SMART CART ENGINE
             if (messageData.type === 'order') {
                 const items = messageData.order.product_items;
                 let totalAmount = 0; 
@@ -469,7 +505,6 @@ app.post('/webhook', async (req, res) => {
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
-            // 📸 TEXT, BUTTONS & MEDIA ENGINE
             let msgBody = "";
             let buttonIdMatch = "";
 
@@ -530,21 +565,15 @@ app.post('/webhook', async (req, res) => {
                             io.to(activeBusinessPhone).emit('new_message', systemReply);
                         }
                     } 
-                    // Don't auto-reply to images/audio if there is no keyword match
                     else if (!msgBody.startsWith('[MEDIA:')) {
-                        // 🧠 UPGRADED BOT BRAIN: Check for multiple comma-separated keywords
                         const allRules = await Rule.find({ businessPhone: activeBusinessPhone });
                         let matchedRule = null;
                         
-                        // Loop through all rules for this business
                         for (let rule of allRules) {
-                            // Split the rule's keyword by commas and trim spaces (e.g. "hi, hello, hey")
                             const triggerWords = rule.keyword.split(',').map(w => w.trim().toLowerCase());
-                            
-                            // Check if ANY of the trigger words are inside the customer's message
                             if (triggerWords.some(trigger => lookupQuery.includes(trigger))) {
                                 matchedRule = rule;
-                                break; // Stop looking once we find a match!
+                                break; 
                             }
                         }
 
