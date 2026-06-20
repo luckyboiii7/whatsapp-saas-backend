@@ -121,22 +121,56 @@ async function sendWhatsAppMediaId(metaPhoneId, metaToken, toPhoneNumber, mediaI
     } catch (error) { return null; }
 }
 
+// 🛡️ NEW: Function to live-test Meta Keys before saving
+async function validateMetaKeys(phoneId, token) {
+    try {
+        const response = await fetch(`https://graph.facebook.com/v20.0/${phoneId}`, {
+            headers: { 'Authorization': `Bearer ${token}` }
+        });
+        const data = await response.json();
+        // If Meta returns an error object, the keys are fake or expired!
+        return !data.error; 
+    } catch (e) { return false; }
+}
+
 // ====================================================================
 // MULTI-TENANT SAAS API ENDPOINTS
 // ====================================================================
 
+// 🔐 UPDATED: Secure Registration with Key Validation and Password
 app.post('/api/register', async (req, res) => {
     try {
-        let user = await User.findOne({ phoneNumber: String(req.body.phoneNumber) });
+        const { businessName, phoneNumber, password, metaPhoneId, metaToken } = req.body;
+
+        // 1. Ensure no duplicate accounts
+        let user = await User.findOne({ phoneNumber: String(phoneNumber) });
         if (user) {
-            user.metaPhoneId = req.body.metaPhoneId;
-            user.metaToken = req.body.metaToken;
-            await user.save();
-            return res.status(200).json({ success: true, message: "Welcome back!", user });
+            return res.status(400).json({ success: false, message: "Phone number already registered. Please go to Login." });
         }
-        user = await User.create({ businessName: req.body.businessName, phoneNumber: String(req.body.phoneNumber), metaPhoneId: req.body.metaPhoneId, metaToken: req.body.metaToken });
-        return res.status(201).json({ success: true, message: "Account created!", user });
-    } catch (error) { return res.status(500).json({ success: false }); }
+
+        // 2. The Shield: Ping Meta to verify keys!
+        const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
+        if (!keysValid) {
+            return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
+        }
+
+        // 3. Create Secure Account
+        user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken });
+        return res.status(201).json({ success: true, message: "Account securely created!", user });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+});
+
+// 🔐 NEW: Dedicated Login Route
+app.post('/api/login', async (req, res) => {
+    try {
+        const { phoneNumber, password } = req.body;
+        const user = await User.findOne({ phoneNumber: String(phoneNumber) });
+        
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+        if (user.password !== password) return res.status(401).json({ success: false, message: "Incorrect password." });
+
+        return res.status(200).json({ success: true, message: "Welcome back!", user });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
 // 📸 NEW: API Proxy to Fetch Images & Audio from Meta
@@ -257,7 +291,6 @@ app.get('/api/rules/:businessPhone', async (req, res) => {
 
 app.post('/api/rules', async (req, res) => {
     try {
-        // Keeps user's exact formatting (e.g. "hi, hello, namaste") so it can be split correctly later
         await Rule.findOneAndUpdate(
             { businessPhone: req.body.businessPhone, keyword: req.body.keyword.toLowerCase() }, 
             { replyText: req.body.replyText }, { upsert: true }
