@@ -84,7 +84,7 @@ async function validateMetaKeys(phoneId, token) {
     } catch (e) { return false; }
 }
 
-// 🛡️ NEW: Unified OTP Dispatcher (Email vs WhatsApp)
+// 🛡️ Unified OTP Dispatcher (Email vs WhatsApp)
 async function handleOtpDispatch(user, deliveryMethod) {
     const otp = Math.floor(1000 + Math.random() * 9000).toString(); // Generates 4 digit pin
     user.otpCode = otp;
@@ -92,10 +92,10 @@ async function handleOtpDispatch(user, deliveryMethod) {
     await user.save();
 
     if (deliveryMethod === 'email') {
-        // Simulated Email sent to Render Logs!
+        // Simulated Email sent to Render Logs
         console.log(`\n\n📧 [MOCK EMAIL SENT] To: ${user.adminEmail} | OTP CODE: ${otp}\n\n`);
     } else {
-        // Sends Real WhatsApp message to their Personal Number using their Business Keys!
+        // Sends Real WhatsApp message to their Personal Number using their Business Keys
         const msg = `🔐 *Security Alert*\nYour WhatsApp SaaS OTP is: *${otp}*.\nDo not share this with anyone. Valid for 10 mins.`;
         await sendWhatsAppMessage(user.metaPhoneId, user.metaToken, user.adminPersonalPhone, msg);
         console.log(`\n\n📱 [WHATSAPP OTP INITIATED] To: ${user.adminPersonalPhone} | OTP CODE: ${otp}\n\n`);
@@ -110,17 +110,38 @@ async function handleOtpDispatch(user, deliveryMethod) {
 // 🔐 REGISTER
 app.post('/api/register', async (req, res) => {
     try {
+        console.log("📝 Incoming Registration Payload:", req.body); // DEBUG LOG
+
         const { businessName, phoneNumber, password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone } = req.body;
 
         let user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        if (user) return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
+        if (user) {
+            console.log("⚠️ Registration failed: User already exists.");
+            return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
+        }
 
         const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
-        if (!keysValid) return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
+        if (!keysValid) {
+            console.log("⚠️ Registration failed: Meta Keys invalid.");
+            return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
+        }
 
-        user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone });
+        user = await User.create({ 
+            businessName, 
+            phoneNumber: String(phoneNumber), 
+            password, 
+            metaPhoneId, 
+            metaToken, 
+            adminEmail, 
+            adminPersonalPhone 
+        });
+
+        console.log("✅ User securely created in DB:", user); // DEBUG LOG
         return res.status(201).json({ success: true, message: "Account securely created!", user });
-    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
+    } catch (error) { 
+        console.error("❌ Registration Error:", error);
+        return res.status(500).json({ success: false, message: "Server error: " + error.message }); 
+    }
 });
 
 // 🔐 LOGIN STEP 1 (Check Password & Send OTP)
@@ -165,6 +186,7 @@ app.post('/api/verify-otp', async (req, res) => {
             return res.status(400).json({ success: false, message: "OTP expired. Please try again." });
         }
 
+        // Clear OTP so it can't be reused
         user.otpCode = undefined;
         user.otpExpires = undefined;
 
