@@ -17,6 +17,7 @@ const UserSchema = new mongoose.Schema({
     otpExpires: { type: Date },                           
 
     subscriptionStatus: { type: String, default: 'trial' }, 
+    lastPaymentId: { type: String }, // 🛠️ NEW: Tracks consumed receipts to prevent double-unlocking
     createdAt: { type: Date, default: Date.now }
 });
 

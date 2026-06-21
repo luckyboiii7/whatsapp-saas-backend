@@ -249,20 +249,22 @@ app.get('/api/business/status/:phone', async (req, res) => {
             const rzpData = await rzpRes.json();
             
             if (rzpData && rzpData.items) {
-                // Find ANY successful payment in the last 24 hours that belongs to this specific user
+                // 🛠️ BULLETPROOF: Ensure the payment hasn't already been consumed (p.notes.order_id !== user.lastPaymentId)
                 const recentlyPaid = rzpData.items.find(p => 
                     p.status === 'captured' && 
                     p.notes && 
                     p.notes.businessPhone === user.phoneNumber && 
                     p.notes.isSubscription === 'true' &&
-                    (Date.now() / 1000 - p.created_at) < 86400 
+                    (Date.now() / 1000 - p.created_at) < 86400 &&
+                    p.notes.order_id !== user.lastPaymentId
                 );
 
                 if (recentlyPaid) {
                     user.subscriptionStatus = 'active';
+                    user.lastPaymentId = recentlyPaid.notes.order_id; // 🛠️ CONSUME THE RECEIPT!
                     await user.save();
                     currentStatus = 'active';
-                    console.log(`✅ ACTIVE RECOVERY: Found Razorpay payment for ${user.businessName}. UNLOCKING!`);
+                    console.log(`✅ ACTIVE RECOVERY: Consumed Razorpay payment for ${user.businessName}. UNLOCKING!`);
                 }
             }
         }
@@ -516,7 +518,7 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🛠️ BULLETPROOF RAZORPAY WEBHOOK
+// 🛠️ BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND PROTECTION
 app.post('/razorpay-webhook', async (req, res) => {
     console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
@@ -536,8 +538,16 @@ app.post('/razorpay-webhook', async (req, res) => {
             
             if (notes.isSubscription === 'true') {
                 const businessPhone = notes.businessPhone;
-                await User.findOneAndUpdate({ phoneNumber: businessPhone }, { subscriptionStatus: 'active' });
-                console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
+                const subOrderId = notes.order_id;
+                
+                const user = await User.findOne({ phoneNumber: businessPhone });
+                // 🛠️ BULLETPROOF: Webhook also checks to ensure receipt isn't double-used
+                if (user && user.lastPaymentId !== subOrderId) {
+                    user.subscriptionStatus = 'active';
+                    user.lastPaymentId = subOrderId; // 🛠️ CONSUME THE RECEIPT!
+                    await user.save();
+                    console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
+                }
             } 
             else {
                 const orderId = notes.order_id; 
