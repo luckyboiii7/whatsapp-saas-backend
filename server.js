@@ -1,4 +1,3 @@
-// FORCING GITHUB UPDATE V5 - CLOUDINARY INTEGRATION
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -8,7 +7,7 @@ const multer = require('multer');
 const fs = require('fs');         
 const os = require('os');         
 const crypto = require('crypto'); 
-const cloudinary = require('cloudinary').v2; // ☁️ Cloudinary Package
+const cloudinary = require('cloudinary').v2; 
 
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
@@ -27,13 +26,13 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 const PORT = process.env.PORT || 3000;
 const MONGO_URI = process.env.MONGO_URI || "your_mongodb_connection_string_here";
 
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "rzp_test_placeholder_key"; 
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "placeholder_secret";
-const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "placeholder_webhook_secret";
+// 💸 YOUR RAZORPAY TEST KEYS INTEGRATED
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "rzp_test_T4NshlJahTxAUs"; 
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "RofcA45NupOB1cLJKtJgbIJj";
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "wadhwasaas2026";
 
 const upload = multer({ dest: os.tmpdir() });
 
-// ☁️ Configure Cloudinary with your secure environment variables
 cloudinary.config({
     cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
     api_key: process.env.CLOUDINARY_API_KEY,
@@ -53,8 +52,7 @@ io.on('connection', (socket) => {
 // ====================================================================
 // CORE HELPER FUNCTIONS
 // ====================================================================
-async function generateRazorpayLink(amount, orderId, customerPhone) {
-    if (RAZORPAY_KEY_ID === "rzp_test_placeholder_key") return `https://razorpay.com/fake-demo-link/pay/${orderId}?amt=${amount}`;
+async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscription = false, businessPhone = "") {
     const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
     try {
         const response = await fetch('https://api.razorpay.com/v1/payment_links', {
@@ -62,10 +60,14 @@ async function generateRazorpayLink(amount, orderId, customerPhone) {
             headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 amount: Math.round(amount * 100), currency: "INR",
-                description: `Payment for Order #${orderId.substring(0, 6)}`,
+                description: isSubscription ? "Monthly SaaS Subscription (Wadhwa Software)" : `Payment for Order #${referenceId.substring(0, 6)}`,
                 customer: { contact: customerPhone },
                 notify: { sms: false, email: false },
-                notes: { order_id: orderId }
+                notes: { 
+                    order_id: referenceId, 
+                    isSubscription: isSubscription ? 'true' : 'false', 
+                    businessPhone: businessPhone 
+                }
             })
         });
         const data = await response.json();
@@ -93,18 +95,15 @@ async function validateMetaKeys(phoneId, token) {
     } catch (e) { return false; }
 }
 
-// 🛡️ Unified OTP Dispatcher (Email vs WhatsApp)
 async function handleOtpDispatch(user, deliveryMethod) {
-    const otp = Math.floor(1000 + Math.random() * 9000).toString(); // Generates 4 digit pin
+    const otp = Math.floor(1000 + Math.random() * 9000).toString(); 
     user.otpCode = otp;
-    user.otpExpires = new Date(Date.now() + 10 * 60000); // Valid for 10 mins
+    user.otpExpires = new Date(Date.now() + 10 * 60000); 
     await user.save();
 
     if (deliveryMethod === 'email') {
-        // Simulated Email sent to Render Logs
         console.log(`\n\n📧 [MOCK EMAIL SENT] To: ${user.adminEmail} | OTP CODE: ${otp}\n\n`);
     } else {
-        // Sends Real WhatsApp message to their Personal Number using their Business Keys
         const msg = `🔐 *Security Alert*\nYour WhatsApp SaaS OTP is: *${otp}*.\nDo not share this with anyone. Valid for 10 mins.`;
         await sendWhatsAppMessage(user.metaPhoneId, user.metaToken, user.adminPersonalPhone, msg);
         console.log(`\n\n📱 [WHATSAPP OTP INITIATED] To: ${user.adminPersonalPhone} | OTP CODE: ${otp}\n\n`);
@@ -116,44 +115,21 @@ async function handleOtpDispatch(user, deliveryMethod) {
 // MULTI-TENANT SAAS API ENDPOINTS (AUTHENTICATION)
 // ====================================================================
 
-// 🔐 REGISTER
 app.post('/api/register', async (req, res) => {
     try {
-        console.log("📝 Incoming Registration Payload:", req.body); // DEBUG LOG
-
         const { businessName, phoneNumber, password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone } = req.body;
 
         let user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        if (user) {
-            console.log("⚠️ Registration failed: User already exists.");
-            return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
-        }
+        if (user) return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
 
         const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
-        if (!keysValid) {
-            console.log("⚠️ Registration failed: Meta Keys invalid.");
-            return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
-        }
+        if (!keysValid) return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
 
-        user = await User.create({ 
-            businessName, 
-            phoneNumber: String(phoneNumber), 
-            password, 
-            metaPhoneId, 
-            metaToken, 
-            adminEmail, 
-            adminPersonalPhone 
-        });
-
-        console.log("✅ User securely created in DB:", user); // DEBUG LOG
+        user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone });
         return res.status(201).json({ success: true, message: "Account securely created!", user });
-    } catch (error) { 
-        console.error("❌ Registration Error:", error);
-        return res.status(500).json({ success: false, message: "Server error: " + error.message }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
-// 🔐 LOGIN STEP 1 (Check Password & Send OTP)
 app.post('/api/login', async (req, res) => {
     try {
         const { phoneNumber, password, deliveryMethod } = req.body;
@@ -167,7 +143,6 @@ app.post('/api/login', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
-// 🔐 FORGOT PASSWORD STEP 1 (No Password Check, Just Send OTP)
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { phoneNumber, deliveryMethod } = req.body;
@@ -180,7 +155,6 @@ app.post('/api/forgot-password', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
-// 🔐 OTP VERIFICATION (Used for both Login & Resetting Password)
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { phoneNumber, otp, newPassword } = req.body;
@@ -195,7 +169,6 @@ app.post('/api/verify-otp', async (req, res) => {
             return res.status(400).json({ success: false, message: "OTP expired. Please try again." });
         }
 
-        // Clear OTP so it can't be reused
         user.otpCode = undefined;
         user.otpExpires = undefined;
 
@@ -207,10 +180,10 @@ app.post('/api/verify-otp', async (req, res) => {
 });
 
 // ====================================================================
-// 🚨 SUPER ADMIN "GOD MODE" ENDPOINTS
+// 🚨 SUPER ADMIN "GOD MODE" & SUBSCRIPTION ENDPOINTS
 // ====================================================================
 
-const SUPER_ADMIN_PASS = "masterwadhwa2026"; // Your secret master password
+const SUPER_ADMIN_PASS = "masterwadhwa2026"; 
 
 app.post('/api/admin/login', (req, res) => {
     if (req.body.password === SUPER_ADMIN_PASS) return res.status(200).json({ success: true });
@@ -233,6 +206,46 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
         await user.save();
         return res.status(200).json({ success: true, status: user.subscriptionStatus });
     } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// 💸 NEW: Automatic 30-Day Trial Expiration Check
+app.get('/api/business/status/:phone', async (req, res) => {
+    try {
+        const user = await User.findOne({ phoneNumber: req.params.phone });
+        if (!user) return res.status(404).json({ success: false });
+
+        let currentStatus = user.subscriptionStatus;
+
+        // ⏱️ If they are on a trial, mathematically check if 30 days have passed
+        if (currentStatus === 'trial') {
+            const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
+            if (new Date() > new Date(user.createdAt.getTime() + thirtyDaysInMillis)) {
+                // Auto-Suspend the user!
+                user.subscriptionStatus = 'suspended';
+                await user.save();
+                currentStatus = 'suspended';
+                console.log(`⏳ Trial Expired for: ${user.businessName}. Account automatically locked.`);
+            }
+        }
+
+        return res.status(200).json({ success: true, status: currentStatus });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// 💸 NEW: Endpoint to generate SaaS Monthly Subscription Payment Link (₹100)
+app.post('/api/subscription/pay', async (req, res) => {
+    try {
+        const user = await User.findOne({ phoneNumber: req.body.businessPhone });
+        if (!user) return res.status(404).json({ success: false });
+
+        // 💸 Set to ₹100 Flat SaaS Fee
+        const paymentLink = await generateRazorpayLink(100, "SUB_" + Date.now(), user.adminPersonalPhone, true, user.phoneNumber);
+        
+        return res.status(200).json({ success: true, url: paymentLink });
+    } catch (error) { 
+        console.error("Payment Link Error:", error);
+        return res.status(500).json({ success: false }); 
+    }
 });
 
 // ====================================================================
@@ -297,7 +310,6 @@ app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
         res.setHeader('Content-Type', metaData.mime_type);
         return res.send(buffer);
     } catch (error) {
-        console.error("Media Fetch Error:", error);
         return res.status(500).send('Error Fetching Media');
     }
 });
@@ -399,20 +411,14 @@ app.post('/api/rules', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// ☁️ NEW: Cloudinary Image Upload Endpoint for the Catalog
 app.post('/api/catalog/upload-image', upload.single('file'), async (req, res) => {
     try {
         if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
-        // Upload the file to Cloudinary
         const result = await cloudinary.uploader.upload(req.file.path, { folder: "whatsapp_saas_catalog" });
-        // Delete the temporary file from the server
         fs.unlinkSync(req.file.path);
         
         return res.status(200).json({ success: true, imageUrl: result.secure_url });
-    } catch (error) {
-        console.error("Cloudinary Upload Error:", error);
-        return res.status(500).json({ success: false });
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/products/:businessPhone', async (req, res) => {
@@ -443,7 +449,7 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         order.totalAmount = req.body.newTotal; order.status = 'pending_payment'; await order.save();
         io.to(order.businessPhone).emit('order_updated', order);
         
-        const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone);
+        const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone, false);
         const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `🧾 Good news! Your custom quotation is ready.\n\nYour final total is ₹${req.body.newTotal}.\n\nSecure Payment Link:\n${paymentLink}`);
         
         const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Final Invoice Link: ₹${req.body.newTotal}]`, direction: 'outgoing' });
@@ -476,17 +482,29 @@ app.post('/razorpay-webhook', async (req, res) => {
         if (expectedSignature !== signature) return res.status(400).send('Invalid signature');
 
         if (req.body.event === 'payment_link.paid') {
-            const orderId = req.body.payload.payment_link.entity.notes.order_id; 
-            const order = await Order.findById(orderId);
-            if (order && order.status !== 'paid') {
-                const business = await User.findOne({ phoneNumber: order.businessPhone });
-                order.status = 'paid'; await order.save();
-                io.to(order.businessPhone).emit('order_updated', order); 
-                for (let item of order.items) { await Product.findOneAndUpdate({ businessPhone: order.businessPhone, name: item.name }, { $inc: { stockQuantity: -item.quantity } }); }
+            const notes = req.body.payload.payment_link.entity.notes;
+            
+            // 1. IS THIS A SAAS SUBSCRIPTION PAYMENT?
+            if (notes.isSubscription === 'true') {
+                const businessPhone = notes.businessPhone;
+                // Instantly unlock their account and reset subscription status
+                await User.findOneAndUpdate({ phoneNumber: businessPhone }, { subscriptionStatus: 'active' });
+                console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
+            } 
+            // 2. THIS IS A NORMAL CUSTOMER ORDER PAYMENT
+            else {
+                const orderId = notes.order_id; 
+                const order = await Order.findById(orderId);
+                if (order && order.status !== 'paid') {
+                    const business = await User.findOne({ phoneNumber: order.businessPhone });
+                    order.status = 'paid'; await order.save();
+                    io.to(order.businessPhone).emit('order_updated', order); 
+                    for (let item of order.items) { await Product.findOneAndUpdate({ businessPhone: order.businessPhone, name: item.name }, { $inc: { stockQuantity: -item.quantity } }); }
 
-                const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `✅ Payment of ₹${order.totalAmount} received automatically via Razorpay!`);
-                const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Automated Payment Receipt]`, direction: 'outgoing' });
-                io.to(order.businessPhone).emit('new_message', systemReply);
+                    const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `✅ Payment of ₹${order.totalAmount} received automatically via Razorpay!`);
+                    const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Automated Payment Receipt]`, direction: 'outgoing' });
+                    io.to(order.businessPhone).emit('new_message', systemReply);
+                }
             }
         }
         res.status(200).send('OK');
@@ -509,13 +527,23 @@ app.post('/webhook', async (req, res) => {
             const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
             
             if (!businessUser) {
-                console.log("Message received for unregistered Phone ID:", businessPhoneId);
                 return res.status(200).send('EVENT_RECEIVED'); 
             }
 
-            // 🛑 KILL SWITCH: If the business didn't pay you, their bot ignores all incoming messages!
-            if (businessUser.subscriptionStatus === 'suspended') {
-                console.log(`Blocked incoming message for suspended account: ${businessUser.businessName}`);
+            // 🛑 30-DAY TRIAL AUTOMATIC KILL SWITCH CHECK BEFORE PROCESSING MESSAGES
+            let currentSubStatus = businessUser.subscriptionStatus;
+            if (currentSubStatus === 'trial') {
+                const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
+                if (new Date() > new Date(businessUser.createdAt.getTime() + thirtyDaysInMillis)) {
+                    businessUser.subscriptionStatus = 'suspended';
+                    await businessUser.save();
+                    currentSubStatus = 'suspended';
+                    console.log(`⏳ Trial Expired via Webhook. Account locked for: ${businessUser.businessName}`);
+                }
+            }
+
+            // 🛑 FINAL CHECK: If they are suspended, ignore all incoming messages!
+            if (currentSubStatus === 'suspended') {
                 return res.status(200).send('EVENT_RECEIVED');
             }
 
@@ -614,7 +642,7 @@ app.post('/webhook', async (req, res) => {
                     
                     if (lookupQuery.startsWith('pay_')) {
                         const parts = lookupQuery.split('_');
-                        const paymentLink = await generateRazorpayLink(parts[2], parts[1], from);
+                        const paymentLink = await generateRazorpayLink(parts[2], parts[1], from, false);
                         const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, `Here is your secure payment link for Order #${parts[1].substring(0,6)}: \n\n${paymentLink}`);
                         const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Secure Payment Link]`, direction: 'outgoing' });
                         io.to(activeBusinessPhone).emit('new_message', systemReply);
@@ -673,4 +701,4 @@ app.post('/webhook', async (req, res) => {
 });
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
-server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V2 OTP SECURE LIVE]"));
+server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS 30-DAY TRIAL LIVE]"));
