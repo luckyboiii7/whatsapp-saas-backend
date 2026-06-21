@@ -1,3 +1,4 @@
+// FORCING GITHUB UPDATE V5 - CLOUDINARY INTEGRATION
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -7,6 +8,7 @@ const multer = require('multer');
 const fs = require('fs');         
 const os = require('os');         
 const crypto = require('crypto'); 
+const cloudinary = require('cloudinary').v2; // ☁️ Cloudinary Package
 
 const Message = require('./models/Message');
 const Rule = require('./models/Rule'); 
@@ -30,6 +32,13 @@ const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "placeholder_secr
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "placeholder_webhook_secret";
 
 const upload = multer({ dest: os.tmpdir() });
+
+// ☁️ Configure Cloudinary with your secure environment variables
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET
+});
 
 mongoose.connect(MONGO_URI)
     .then(() => console.log("💾 Connected to MongoDB Atlas Cloud!"))
@@ -388,6 +397,22 @@ app.post('/api/rules', async (req, res) => {
         );
         return res.status(200).json({ success: true });
     } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// ☁️ NEW: Cloudinary Image Upload Endpoint for the Catalog
+app.post('/api/catalog/upload-image', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
+        // Upload the file to Cloudinary
+        const result = await cloudinary.uploader.upload(req.file.path, { folder: "whatsapp_saas_catalog" });
+        // Delete the temporary file from the server
+        fs.unlinkSync(req.file.path);
+        
+        return res.status(200).json({ success: true, imageUrl: result.secure_url });
+    } catch (error) {
+        console.error("Cloudinary Upload Error:", error);
+        return res.status(500).json({ success: false });
+    }
 });
 
 app.get('/api/products/:businessPhone', async (req, res) => {
