@@ -198,6 +198,35 @@ app.post('/api/verify-otp', async (req, res) => {
 });
 
 // ====================================================================
+// 🚨 SUPER ADMIN "GOD MODE" ENDPOINTS
+// ====================================================================
+
+const SUPER_ADMIN_PASS = "masterwadhwa2026"; // Your secret master password
+
+app.post('/api/admin/login', (req, res) => {
+    if (req.body.password === SUPER_ADMIN_PASS) return res.status(200).json({ success: true });
+    return res.status(401).json({ success: false, message: "Unauthorized" });
+});
+
+app.get('/api/admin/users', async (req, res) => {
+    try {
+        const users = await User.find({}, 'businessName phoneNumber adminEmail adminPersonalPhone subscriptionStatus createdAt metaPhoneId');
+        return res.status(200).json({ success: true, data: users });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
+    try {
+        const user = await User.findById(req.params.id);
+        if (!user) return res.status(404).json({ success: false });
+        
+        user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
+        await user.save();
+        return res.status(200).json({ success: true, status: user.subscriptionStatus });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// ====================================================================
 // OTHER ENDPOINTS & WEBHOOK LOGIC
 // ====================================================================
 
@@ -457,6 +486,12 @@ app.post('/webhook', async (req, res) => {
             if (!businessUser) {
                 console.log("Message received for unregistered Phone ID:", businessPhoneId);
                 return res.status(200).send('EVENT_RECEIVED'); 
+            }
+
+            // 🛑 KILL SWITCH: If the business didn't pay you, their bot ignores all incoming messages!
+            if (businessUser.subscriptionStatus === 'suspended') {
+                console.log(`Blocked incoming message for suspended account: ${businessUser.businessName}`);
+                return res.status(200).send('EVENT_RECEIVED');
             }
 
             const activeBusinessPhone = businessUser.phoneNumber;
