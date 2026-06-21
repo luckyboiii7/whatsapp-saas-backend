@@ -205,7 +205,7 @@ app.post('/api/admin/login', (req, res) => {
 
 app.get('/api/admin/users', async (req, res) => {
     try {
-        const users = await User.find({}, 'businessName phoneNumber adminEmail adminPersonalPhone subscriptionStatus createdAt metaPhoneId');
+        const users = await User.find({}, 'businessName phoneNumber adminEmail adminPersonalPhone subscriptionStatus createdAt metaPhoneId subscriptionExpiresAt');
         return res.status(200).json({ success: true, data: users });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
@@ -221,7 +221,7 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE: Checks Razorpay even if the webhook failed!
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Bulletproof Security Checks)
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -229,18 +229,15 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
         let currentStatus = user.subscriptionStatus;
 
-        // 1. Math Check: Has the 30 day trial expired?
-        if (currentStatus === 'trial') {
-            const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
-            if (new Date() > new Date(user.createdAt.getTime() + thirtyDaysInMillis)) {
-                user.subscriptionStatus = 'suspended';
-                await user.save();
-                currentStatus = 'suspended';
-                console.log(`⏳ Trial Expired for: ${user.businessName}. Account locked.`);
-            }
+        // 1. Math Check: Has their CLOCK expired?
+        if (new Date() > user.subscriptionExpiresAt && currentStatus !== 'suspended') {
+            user.subscriptionStatus = 'suspended';
+            await user.save();
+            currentStatus = 'suspended';
+            console.log(`⏳ Subscription Expired for: ${user.businessName}. Account locked.`);
         }
 
-        // 2. 🛠️ ACTIVE RECOVERY: If suspended, directly ask Razorpay if they paid!
+        // 2. 🛠️ ACTIVE RECOVERY: If suspended, check Razorpay history securely
         if (currentStatus === 'suspended') {
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
             const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
@@ -249,22 +246,34 @@ app.get('/api/business/status/:phone', async (req, res) => {
             const rzpData = await rzpRes.json();
             
             if (rzpData && rzpData.items) {
-                // 🛠️ BULLETPROOF: Ensure the payment hasn't already been consumed (p.notes.order_id !== user.lastPaymentId)
                 const recentlyPaid = rzpData.items.find(p => 
                     p.status === 'captured' && 
+                    p.amount >= 10000 && // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise)
                     p.notes && 
                     p.notes.businessPhone === user.phoneNumber && 
                     p.notes.isSubscription === 'true' &&
                     (Date.now() / 1000 - p.created_at) < 86400 &&
-                    p.notes.order_id !== user.lastPaymentId
+                    !user.consumedReceipts.includes(p.notes.order_id) // 🏦 Ensure receipt is not in the vault
                 );
 
                 if (recentlyPaid) {
-                    user.subscriptionStatus = 'active';
-                    user.lastPaymentId = recentlyPaid.notes.order_id; // 🛠️ CONSUME THE RECEIPT!
-                    await user.save();
-                    currentStatus = 'active';
-                    console.log(`✅ ACTIVE RECOVERY: Consumed Razorpay payment for ${user.businessName}. UNLOCKING!`);
+                    // 🛡️ ATOMIC UPDATE: Protects against double-click race conditions
+                    const updatedUser = await User.findOneAndUpdate(
+                        { phoneNumber: user.phoneNumber, consumedReceipts: { $ne: recentlyPaid.notes.order_id } },
+                        {
+                            $set: { 
+                                subscriptionStatus: 'active',
+                                subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 🗓️ Add 30 Days
+                            },
+                            $push: { consumedReceipts: recentlyPaid.notes.order_id } // 🏦 Lock receipt in vault
+                        },
+                        { new: true }
+                    );
+
+                    if (updatedUser) {
+                        currentStatus = 'active';
+                        console.log(`✅ ACTIVE RECOVERY: Validated ₹100 payment for ${user.businessName}. Added 30 Days. UNLOCKING!`);
+                    }
                 }
             }
         }
@@ -518,13 +527,12 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🛠️ BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND PROTECTION
+// 🛠️ BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND & AMOUNT PROTECTION
 app.post('/razorpay-webhook', async (req, res) => {
     console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
         const signature = req.headers['x-razorpay-signature'];
         
-        // Ensures the signature matching is flawless
         const bodyToHash = req.rawBody || JSON.stringify(req.body);
         const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(bodyToHash).digest('hex');
         
@@ -534,25 +542,41 @@ app.post('/razorpay-webhook', async (req, res) => {
         }
 
         if (req.body.event === 'payment_link.paid') {
-            const notes = req.body.payload.payment_link.entity.notes;
+            const entity = req.body.payload.payment_link.entity;
+            const notes = entity.notes;
+            const amountPaid = entity.amount; // 🛡️ Get the exact paise paid
             
             if (notes.isSubscription === 'true') {
                 const businessPhone = notes.businessPhone;
                 const subOrderId = notes.order_id;
                 
-                const user = await User.findOne({ phoneNumber: businessPhone });
-                // 🛠️ BULLETPROOF: Webhook also checks to ensure receipt isn't double-used
-                if (user && user.lastPaymentId !== subOrderId) {
-                    user.subscriptionStatus = 'active';
-                    user.lastPaymentId = subOrderId; // 🛠️ CONSUME THE RECEIPT!
-                    await user.save();
-                    console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
+                // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise)
+                if (amountPaid >= 10000) {
+                    // 🛡️ ATOMIC UPDATE: Protects against double-click race conditions from webhook side
+                    const updatedUser = await User.findOneAndUpdate(
+                        { phoneNumber: businessPhone, consumedReceipts: { $ne: subOrderId } },
+                        {
+                            $set: { 
+                                subscriptionStatus: 'active',
+                                subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000)
+                            },
+                            $push: { consumedReceipts: subOrderId }
+                        },
+                        { new: true }
+                    );
+
+                    if (updatedUser) {
+                        console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
+                    }
+                } else {
+                    console.log(`❌ SCAM ATTEMPT: ${businessPhone} tried to pay less than ₹100 via Webhook!`);
                 }
             } 
             else {
                 const orderId = notes.order_id; 
                 const order = await Order.findById(orderId);
-                if (order && order.status !== 'paid') {
+                // Simple verify that amount paid matches order amount roughly
+                if (order && order.status !== 'paid' && amountPaid >= (order.totalAmount * 100)) {
                     const business = await User.findOne({ phoneNumber: order.businessPhone });
                     order.status = 'paid'; await order.save();
                     io.to(order.businessPhone).emit('order_updated', order); 
@@ -590,14 +614,12 @@ app.post('/webhook', async (req, res) => {
 
             // 🛑 30-DAY TRIAL AUTOMATIC KILL SWITCH
             let currentSubStatus = businessUser.subscriptionStatus;
-            if (currentSubStatus === 'trial') {
-                const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
-                if (new Date() > new Date(businessUser.createdAt.getTime() + thirtyDaysInMillis)) {
-                    businessUser.subscriptionStatus = 'suspended';
-                    await businessUser.save();
-                    currentSubStatus = 'suspended';
-                    console.log(`⏳ Trial Expired via Webhook. Account locked for: ${businessUser.businessName}`);
-                }
+            
+            if (new Date() > businessUser.subscriptionExpiresAt && currentSubStatus !== 'suspended') {
+                businessUser.subscriptionStatus = 'suspended';
+                await businessUser.save();
+                currentSubStatus = 'suspended';
+                console.log(`⏳ Subscription Expired via Webhook. Account locked for: ${businessUser.businessName}`);
             }
 
             if (currentSubStatus === 'suspended') {
