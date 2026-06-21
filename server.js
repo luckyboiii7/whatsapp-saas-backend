@@ -805,5 +805,52 @@ app.post('/webhook', async (req, res) => {
     return res.sendStatus(404);
 });
 
+// ====================================================================
+// 🛒 ABANDONED CART RECOVERY ENGINE (Runs every 30 mins)
+// ====================================================================
+setInterval(async () => {
+    try {
+        console.log("🔍 Scanning for abandoned carts...");
+        // 2 hours ago exactly
+        const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
+
+        // Find unpaid orders created MORE than 2 hours ago that haven't gotten a reminder
+        const abandonedOrders = await Order.find({
+            status: { $ne: 'paid' },
+            createdAt: { $lt: twoHoursAgo },
+            reminderSent: { $ne: true } 
+        });
+
+        for (let order of abandonedOrders) {
+            const business = await User.findOne({ phoneNumber: order.businessPhone });
+            
+            // Only send reminder if the business's subscription is active!
+            if (business && business.subscriptionStatus === 'active') {
+                let reminderText = `🛒 *Cart Reminder!*\n\nHi! We noticed you left some items in your cart a few hours ago.\n\nYour total is ₹${order.totalAmount}.\n\nReply to this message if you need any help completing your order, or let us know if you'd like to make changes!`;
+                
+                const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, reminderText);
+                
+                if (outboundId) {
+                    order.reminderSent = true; // Mark as sent so we don't spam them!
+                    await order.save();
+
+                    // Log it in the chat dashboard
+                    const systemReply = await Message.create({ 
+                        businessPhone: order.businessPhone, 
+                        whatsappId: outboundId || `reply-${Date.now()}`, 
+                        fromNumber: order.customerPhone, 
+                        body: `[Automated Abandoned Cart Reminder Sent]`, 
+                        direction: 'outgoing' 
+                    });
+                    io.to(order.businessPhone).emit('new_message', systemReply);
+                    console.log(`✅ Sent abandoned cart reminder to ${order.customerPhone}`);
+                }
+            }
+        }
+    } catch (err) {
+        console.error("❌ Abandoned Cart Engine Error:", err);
+    }
+}, 30 * 60 * 1000); // Runs in the background every 30 minutes
+
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
 server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS 30-DAY TRIAL LIVE]"));
