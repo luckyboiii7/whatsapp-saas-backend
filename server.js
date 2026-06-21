@@ -228,7 +228,7 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Bulletproof Check with The Clock & Time Barrier)
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Enterprise-Grade Protections)
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -246,7 +246,7 @@ app.get('/api/business/status/:phone', async (req, res) => {
             console.log(`⏳ Subscription Expired for: ${user.businessName}. Account locked.`);
         }
 
-        // 2. 🛠️ ACTIVE RECOVERY: Check Razorpay securely using the TIME BARRIER
+        // 2. 🛠️ ACTIVE RECOVERY: Check Razorpay securely using the TIME BARRIER & PAGINATION FIX
         if (currentStatus === 'suspended') {
             
             // 🛡️ Establish the "Time Barrier" (Must be newer than Account Creation OR Admin Suspension)
@@ -259,7 +259,8 @@ app.get('/api/business/status/:phone', async (req, res) => {
             });
 
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-            const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
+            // 🛡️ SECURITY FIX 1: Fetch 100 payments instead of the default 10 to avoid Pagination Blindspots
+            const rzpRes = await fetch('https://api.razorpay.com/v1/payments?count=100', {
                 headers: { 'Authorization': `Basic ${auth}` }
             });
             const rzpData = await rzpRes.json();
@@ -268,10 +269,11 @@ app.get('/api/business/status/:phone', async (req, res) => {
                 const recentlyPaid = rzpData.items.find(p => 
                     p.status === 'captured' && 
                     p.amount >= 10000 && // 🛡️ Ensure they paid at least ₹100! (10000 paise)
+                    p.currency === 'INR' && // 🛡️ SECURITY FIX 2: Strict Currency Lock to prevent Forex exploits
                     p.notes && 
                     p.notes.businessPhone === user.phoneNumber && 
                     p.notes.isSubscription === 'true' &&
-                    (p.created_at * 1000) > timeBarrier && // 🛡️ GHOST FIX: Payment MUST be newer than the Time Barrier!
+                    (p.created_at * 1000) > timeBarrier && // 🛡️ Time Barrier
                     !user.consumedReceipts.includes(p.notes.order_id) 
                 );
 
@@ -546,7 +548,7 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🛠️ BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND & AMOUNT PROTECTION
+// 🛠️ ENTERPRISE SECURITY: BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND & FOREX PROTECTION
 app.post('/razorpay-webhook', async (req, res) => {
     console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
@@ -563,14 +565,17 @@ app.post('/razorpay-webhook', async (req, res) => {
         if (req.body.event === 'payment_link.paid') {
             const entity = req.body.payload.payment_link.entity;
             const notes = entity.notes;
-            const amountPaid = entity.amount; // 🛡️ Get the exact paise paid
+            
+            // 🛡️ Ensure we check 'amount_paid' (what cleared the bank) instead of just the invoice amount
+            const amountPaid = entity.amount_paid || entity.amount; 
+            const paymentCurrency = entity.currency;
             
             if (notes.isSubscription === 'true') {
                 const businessPhone = notes.businessPhone;
                 const subOrderId = notes.order_id;
                 
-                // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise)
-                if (amountPaid >= 10000) {
+                // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise) AND they paid in INR!
+                if (amountPaid >= 10000 && paymentCurrency === 'INR') {
                     // 🛡️ ATOMIC UPDATE: Protects against double-click race conditions from webhook side
                     const updatedUser = await User.findOneAndUpdate(
                         { phoneNumber: businessPhone, consumedReceipts: { $ne: subOrderId } },
@@ -588,14 +593,14 @@ app.post('/razorpay-webhook', async (req, res) => {
                         console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
                     }
                 } else {
-                    console.log(`❌ SCAM ATTEMPT: ${businessPhone} tried to pay less than ₹100 via Webhook!`);
+                    console.log(`❌ SCAM ATTEMPT: ${businessPhone} tried to fake the amount or currency via Webhook!`);
                 }
             } 
             else {
                 const orderId = notes.order_id; 
                 const order = await Order.findById(orderId);
-                // Simple verify that amount paid matches order amount roughly
-                if (order && order.status !== 'paid' && amountPaid >= (order.totalAmount * 100)) {
+                // 🛡️ Same strict checks for physical customer orders
+                if (order && order.status !== 'paid' && amountPaid >= (order.totalAmount * 100) && paymentCurrency === 'INR') {
                     const business = await User.findOne({ phoneNumber: order.businessPhone });
                     order.status = 'paid'; await order.save();
                     io.to(order.businessPhone).emit('order_updated', order); 
