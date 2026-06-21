@@ -221,6 +221,7 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE: Checks Razorpay even if the webhook failed!
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -228,18 +229,49 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
         let currentStatus = user.subscriptionStatus;
 
+        // 1. Math Check: Has the 30 day trial expired?
         if (currentStatus === 'trial') {
             const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
             if (new Date() > new Date(user.createdAt.getTime() + thirtyDaysInMillis)) {
                 user.subscriptionStatus = 'suspended';
                 await user.save();
                 currentStatus = 'suspended';
-                console.log(`⏳ Trial Expired for: ${user.businessName}. Account automatically locked.`);
+                console.log(`⏳ Trial Expired for: ${user.businessName}. Account locked.`);
+            }
+        }
+
+        // 2. 🛠️ ACTIVE RECOVERY: If suspended, directly ask Razorpay if they paid!
+        if (currentStatus === 'suspended') {
+            const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
+            const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
+                headers: { 'Authorization': `Basic ${auth}` }
+            });
+            const rzpData = await rzpRes.json();
+            
+            if (rzpData && rzpData.items) {
+                // Find ANY successful payment in the last 24 hours that belongs to this specific user
+                const recentlyPaid = rzpData.items.find(p => 
+                    p.status === 'captured' && 
+                    p.notes && 
+                    p.notes.businessPhone === user.phoneNumber && 
+                    p.notes.isSubscription === 'true' &&
+                    (Date.now() / 1000 - p.created_at) < 86400 
+                );
+
+                if (recentlyPaid) {
+                    user.subscriptionStatus = 'active';
+                    await user.save();
+                    currentStatus = 'active';
+                    console.log(`✅ ACTIVE RECOVERY: Found Razorpay payment for ${user.businessName}. UNLOCKING!`);
+                }
             }
         }
 
         return res.status(200).json({ success: true, status: currentStatus });
-    } catch (error) { return res.status(500).json({ success: false }); }
+    } catch (error) { 
+        console.error("Status Check Error:", error);
+        return res.status(500).json({ success: false }); 
+    }
 });
 
 app.post('/api/subscription/pay', async (req, res) => {
@@ -484,10 +516,16 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// 🛠️ BULLETPROOF RAZORPAY WEBHOOK
 app.post('/razorpay-webhook', async (req, res) => {
+    console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
         const signature = req.headers['x-razorpay-signature'];
-        const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
+        
+        // Ensures the signature matching is flawless
+        const bodyToHash = req.rawBody || JSON.stringify(req.body);
+        const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(bodyToHash).digest('hex');
+        
         if (expectedSignature !== signature) {
             console.error("❌ Webhook Signature Mismatch!");
             return res.status(400).send('Invalid signature');
