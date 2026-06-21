@@ -18,7 +18,13 @@ const Product = require('./models/Product');
 
 const app = express();
 app.use(cors()); 
-app.use(express.json());
+
+// 🛠️ BUG FIX: Capture raw body for perfect Razorpay Webhook signature matching!
+app.use(express.json({
+    verify: (req, res, buf) => {
+        req.rawBody = buf.toString();
+    }
+}));
 
 const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
@@ -44,31 +50,31 @@ mongoose.connect(MONGO_URI)
     .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
 io.on('connection', (socket) => {
-    socket.on('join_channel', (businessPhone) => { 
-        socket.join(businessPhone); 
-    });
-});
-
-// ====================================================================
-// CORE HELPER FUNCTIONS
-// ====================================================================
-async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscription = false, businessPhone = "") {
+async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscription = false, businessPhone = "", callbackUrl = "") {
     const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
     try {
+        const payload = {
+            amount: Math.round(amount * 100), currency: "INR",
+            description: isSubscription ? "Monthly SaaS Subscription (Wadhwa Software)" : `Payment for Order #${referenceId.substring(0, 6)}`,
+            customer: { contact: customerPhone },
+            notify: { sms: false, email: false },
+            notes: { 
+                order_id: referenceId, 
+                isSubscription: isSubscription ? 'true' : 'false', 
+                businessPhone: businessPhone 
+            }
+        };
+
+        // 🛠️ BUG FIX: If a callback URL is provided, tell Razorpay to automatically redirect!
+        if (callbackUrl) {
+            payload.callback_url = callbackUrl;
+            payload.callback_method = "get";
+        }
+
         const response = await fetch('https://api.razorpay.com/v1/payment_links', {
             method: 'POST',
             headers: { 'Authorization': `Basic ${auth}`, 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                amount: Math.round(amount * 100), currency: "INR",
-                description: isSubscription ? "Monthly SaaS Subscription (Wadhwa Software)" : `Payment for Order #${referenceId.substring(0, 6)}`,
-                customer: { contact: customerPhone },
-                notify: { sms: false, email: false },
-                notes: { 
-                    order_id: referenceId, 
-                    isSubscription: isSubscription ? 'true' : 'false', 
-                    businessPhone: businessPhone 
-                }
-            })
+            body: JSON.stringify(payload)
         });
         const data = await response.json();
         return data.short_url; 
@@ -238,8 +244,8 @@ app.post('/api/subscription/pay', async (req, res) => {
         const user = await User.findOne({ phoneNumber: req.body.businessPhone });
         if (!user) return res.status(404).json({ success: false });
 
-        // 💸 Set to ₹100 Flat SaaS Fee
-        const paymentLink = await generateRazorpayLink(100, "SUB_" + Date.now(), user.adminPersonalPhone, true, user.phoneNumber);
+        // 💸 Set to ₹100 Flat SaaS Fee, and pass the callbackUrl from the frontend!
+        const paymentLink = await generateRazorpayLink(100, "SUB_" + Date.now(), user.adminPersonalPhone, true, user.phoneNumber, req.body.callbackUrl);
         
         return res.status(200).json({ success: true, url: paymentLink });
     } catch (error) { 
@@ -478,8 +484,14 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
 app.post('/razorpay-webhook', async (req, res) => {
     try {
         const signature = req.headers['x-razorpay-signature'];
-        const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(JSON.stringify(req.body)).digest('hex');
-        if (expectedSignature !== signature) return res.status(400).send('Invalid signature');
+        
+        // 🛠️ BUG FIX: Use rawBody instead of JSON.stringify to guarantee signature matches exactly!
+        const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
+        
+        if (expectedSignature !== signature) {
+            console.error("❌ Webhook Signature Mismatch! Check RAZORPAY_WEBHOOK_SECRET in Render.");
+            return res.status(400).send('Invalid signature');
+        }
 
         if (req.body.event === 'payment_link.paid') {
             const notes = req.body.payload.payment_link.entity.notes;
