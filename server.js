@@ -216,12 +216,19 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
         if (!user) return res.status(404).json({ success: false });
         
         user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
+        
+        // 🛡️ TIME BARRIER: If admin suspends manually, drop a timestamp in the vault!
+        if (user.subscriptionStatus === 'suspended') {
+            user.consumedReceipts.push('ADMIN_SUSPEND_' + Date.now());
+            user.subscriptionExpiresAt = new Date(Date.now() - 1000); // Expire the clock instantly
+        }
+
         await user.save();
         return res.status(200).json({ success: true, status: user.subscriptionStatus });
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Bulletproof Security Checks)
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Bulletproof Check with The Clock & Time Barrier)
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -232,13 +239,25 @@ app.get('/api/business/status/:phone', async (req, res) => {
         // 1. Math Check: Has their CLOCK expired?
         if (new Date() > user.subscriptionExpiresAt && currentStatus !== 'suspended') {
             user.subscriptionStatus = 'suspended';
+            // Drop a time barrier for auto-expirations too!
+            user.consumedReceipts.push('AUTO_EXPIRE_' + Date.now());
             await user.save();
             currentStatus = 'suspended';
             console.log(`⏳ Subscription Expired for: ${user.businessName}. Account locked.`);
         }
 
-        // 2. 🛠️ ACTIVE RECOVERY: If suspended, check Razorpay history securely
+        // 2. 🛠️ ACTIVE RECOVERY: Check Razorpay securely using the TIME BARRIER
         if (currentStatus === 'suspended') {
+            
+            // 🛡️ Establish the "Time Barrier" (Must be newer than Account Creation OR Admin Suspension)
+            let timeBarrier = user.createdAt.getTime();
+            user.consumedReceipts.forEach(receipt => {
+                if (receipt.startsWith('ADMIN_SUSPEND_') || receipt.startsWith('AUTO_EXPIRE_')) {
+                    const suspendTime = parseInt(receipt.split('_')[2]);
+                    if (suspendTime > timeBarrier) timeBarrier = suspendTime;
+                }
+            });
+
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
             const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
                 headers: { 'Authorization': `Basic ${auth}` }
@@ -248,12 +267,12 @@ app.get('/api/business/status/:phone', async (req, res) => {
             if (rzpData && rzpData.items) {
                 const recentlyPaid = rzpData.items.find(p => 
                     p.status === 'captured' && 
-                    p.amount >= 10000 && // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise)
+                    p.amount >= 10000 && // 🛡️ Ensure they paid at least ₹100! (10000 paise)
                     p.notes && 
                     p.notes.businessPhone === user.phoneNumber && 
                     p.notes.isSubscription === 'true' &&
-                    (Date.now() / 1000 - p.created_at) < 86400 &&
-                    !user.consumedReceipts.includes(p.notes.order_id) // 🏦 Ensure receipt is not in the vault
+                    (p.created_at * 1000) > timeBarrier && // 🛡️ GHOST FIX: Payment MUST be newer than the Time Barrier!
+                    !user.consumedReceipts.includes(p.notes.order_id) 
                 );
 
                 if (recentlyPaid) {
@@ -617,6 +636,8 @@ app.post('/webhook', async (req, res) => {
             
             if (new Date() > businessUser.subscriptionExpiresAt && currentSubStatus !== 'suspended') {
                 businessUser.subscriptionStatus = 'suspended';
+                // Drop a time barrier into the vault for expiration as well!
+                businessUser.consumedReceipts.push('AUTO_EXPIRE_' + Date.now());
                 await businessUser.save();
                 currentSubStatus = 'suspended';
                 console.log(`⏳ Subscription Expired via Webhook. Account locked for: ${businessUser.businessName}`);
