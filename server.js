@@ -196,7 +196,7 @@ app.post('/api/verify-otp', async (req, res) => {
 // 🚨 SUPER ADMIN "GOD MODE" & SUBSCRIPTION ENDPOINTS
 // ====================================================================
 
-const SUPER_ADMIN_PASS = "masterwadhwa2026"; 
+const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; 
 
 app.post('/api/admin/login', (req, res) => {
     if (req.body.password === SUPER_ADMIN_PASS) return res.status(200).json({ success: true });
@@ -317,6 +317,59 @@ app.post('/api/subscription/pay', async (req, res) => {
     } catch (error) { 
         console.error("Payment Link Error:", error);
         return res.status(500).json({ success: false }); 
+    }
+});
+
+// ====================================================================
+// 📊 SAAS ANALYTICS & SETTINGS ENDPOINTS (NEW POLISH FEATURES)
+// ====================================================================
+
+app.get('/api/analytics/:businessPhone', async (req, res) => {
+    try {
+        const phone = req.params.businessPhone;
+        
+        // 1. Total Revenue (sum of paid orders)
+        const paidOrders = await Order.find({ businessPhone: phone, status: 'paid' });
+        const totalRevenue = paidOrders.reduce((sum, order) => sum + order.totalAmount, 0);
+
+        // 2. Total Orders Count
+        const totalOrdersCount = await Order.countDocuments({ businessPhone: phone });
+
+        // 3. Low Stock Alert Count (Less than 5 items left)
+        const lowStockCount = await Product.countDocuments({ businessPhone: phone, stockQuantity: { $lt: 5 } });
+
+        // 4. Total Unique Customers Lead Gen
+        const uniqueCustomers = await Message.distinct('fromNumber', { businessPhone: phone, direction: 'incoming' });
+
+        return res.status(200).json({
+            success: true,
+            data: {
+                totalRevenue,
+                totalOrdersCount,
+                lowStockCount,
+                totalContacts: uniqueCustomers.length
+            }
+        });
+    } catch (error) {
+        console.error("Analytics Error:", error);
+        return res.status(500).json({ success: false });
+    }
+});
+
+app.post('/api/business/settings', async (req, res) => {
+    try {
+        const { businessPhone, newBusinessName, newAdminEmail, newPassword } = req.body;
+        const user = await User.findOne({ phoneNumber: businessPhone });
+        if (!user) return res.status(404).json({ success: false });
+
+        if (newBusinessName) user.businessName = newBusinessName;
+        if (newAdminEmail) user.adminEmail = newAdminEmail;
+        if (newPassword) user.password = newPassword; 
+
+        await user.save();
+        return res.status(200).json({ success: true, message: "Settings Updated!" });
+    } catch (error) {
+        return res.status(500).json({ success: false });
     }
 });
 
