@@ -19,7 +19,7 @@ const Product = require('./models/Product');
 const app = express();
 app.use(cors()); 
 
-// 🛠️ BUG FIX: Capture raw body for perfect Razorpay Webhook signature matching!
+// 🛠️ CAPTURE RAW BODY FOR RAZORPAY SECURITY SIGNATURE
 app.use(express.json({
     verify: (req, res, buf) => {
         req.rawBody = buf.toString();
@@ -50,6 +50,14 @@ mongoose.connect(MONGO_URI)
     .catch((err) => console.error("❌ MongoDB Connection Error:", err));
 
 io.on('connection', (socket) => {
+    socket.on('join_channel', (businessPhone) => { 
+        socket.join(businessPhone); 
+    });
+});
+
+// ====================================================================
+// CORE HELPER FUNCTIONS
+// ====================================================================
 async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscription = false, businessPhone = "", callbackUrl = "") {
     const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
     try {
@@ -65,7 +73,6 @@ async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscr
             }
         };
 
-        // 🛠️ BUG FIX: If a callback URL is provided, tell Razorpay to automatically redirect!
         if (callbackUrl) {
             payload.callback_url = callbackUrl;
             payload.callback_method = "get";
@@ -214,7 +221,6 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 NEW: Automatic 30-Day Trial Expiration Check
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -222,11 +228,9 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
         let currentStatus = user.subscriptionStatus;
 
-        // ⏱️ If they are on a trial, mathematically check if 30 days have passed
         if (currentStatus === 'trial') {
             const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
             if (new Date() > new Date(user.createdAt.getTime() + thirtyDaysInMillis)) {
-                // Auto-Suspend the user!
                 user.subscriptionStatus = 'suspended';
                 await user.save();
                 currentStatus = 'suspended';
@@ -238,13 +242,11 @@ app.get('/api/business/status/:phone', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 NEW: Endpoint to generate SaaS Monthly Subscription Payment Link (₹100)
 app.post('/api/subscription/pay', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.body.businessPhone });
         if (!user) return res.status(404).json({ success: false });
 
-        // 💸 Set to ₹100 Flat SaaS Fee, and pass the callbackUrl from the frontend!
         const paymentLink = await generateRazorpayLink(100, "SUB_" + Date.now(), user.adminPersonalPhone, true, user.phoneNumber, req.body.callbackUrl);
         
         return res.status(200).json({ success: true, url: paymentLink });
@@ -316,6 +318,7 @@ app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
         res.setHeader('Content-Type', metaData.mime_type);
         return res.send(buffer);
     } catch (error) {
+        console.error("Media Fetch Error:", error);
         return res.status(500).send('Error Fetching Media');
     }
 });
@@ -455,7 +458,7 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         order.totalAmount = req.body.newTotal; order.status = 'pending_payment'; await order.save();
         io.to(order.businessPhone).emit('order_updated', order);
         
-        const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone, false);
+        const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone);
         const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `🧾 Good news! Your custom quotation is ready.\n\nYour final total is ₹${req.body.newTotal}.\n\nSecure Payment Link:\n${paymentLink}`);
         
         const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Final Invoice Link: ₹${req.body.newTotal}]`, direction: 'outgoing' });
@@ -484,26 +487,20 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
 app.post('/razorpay-webhook', async (req, res) => {
     try {
         const signature = req.headers['x-razorpay-signature'];
-        
-        // 🛠️ BUG FIX: Use rawBody instead of JSON.stringify to guarantee signature matches exactly!
         const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(req.rawBody).digest('hex');
-        
         if (expectedSignature !== signature) {
-            console.error("❌ Webhook Signature Mismatch! Check RAZORPAY_WEBHOOK_SECRET in Render.");
+            console.error("❌ Webhook Signature Mismatch!");
             return res.status(400).send('Invalid signature');
         }
 
         if (req.body.event === 'payment_link.paid') {
             const notes = req.body.payload.payment_link.entity.notes;
             
-            // 1. IS THIS A SAAS SUBSCRIPTION PAYMENT?
             if (notes.isSubscription === 'true') {
                 const businessPhone = notes.businessPhone;
-                // Instantly unlock their account and reset subscription status
                 await User.findOneAndUpdate({ phoneNumber: businessPhone }, { subscriptionStatus: 'active' });
                 console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
             } 
-            // 2. THIS IS A NORMAL CUSTOMER ORDER PAYMENT
             else {
                 const orderId = notes.order_id; 
                 const order = await Order.findById(orderId);
@@ -539,10 +536,11 @@ app.post('/webhook', async (req, res) => {
             const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
             
             if (!businessUser) {
+                console.log("Message received for unregistered Phone ID:", businessPhoneId);
                 return res.status(200).send('EVENT_RECEIVED'); 
             }
 
-            // 🛑 30-DAY TRIAL AUTOMATIC KILL SWITCH CHECK BEFORE PROCESSING MESSAGES
+            // 🛑 30-DAY TRIAL AUTOMATIC KILL SWITCH
             let currentSubStatus = businessUser.subscriptionStatus;
             if (currentSubStatus === 'trial') {
                 const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
@@ -554,7 +552,6 @@ app.post('/webhook', async (req, res) => {
                 }
             }
 
-            // 🛑 FINAL CHECK: If they are suspended, ignore all incoming messages!
             if (currentSubStatus === 'suspended') {
                 return res.status(200).send('EVENT_RECEIVED');
             }
@@ -654,7 +651,7 @@ app.post('/webhook', async (req, res) => {
                     
                     if (lookupQuery.startsWith('pay_')) {
                         const parts = lookupQuery.split('_');
-                        const paymentLink = await generateRazorpayLink(parts[2], parts[1], from, false);
+                        const paymentLink = await generateRazorpayLink(parts[2], parts[1], from);
                         const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, `Here is your secure payment link for Order #${parts[1].substring(0,6)}: \n\n${paymentLink}`);
                         const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Secure Payment Link]`, direction: 'outgoing' });
                         io.to(activeBusinessPhone).emit('new_message', systemReply);
