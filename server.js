@@ -217,10 +217,9 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
         
         user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
         
-        // 🛡️ TIME BARRIER: If admin suspends manually, drop a timestamp in the vault!
         if (user.subscriptionStatus === 'suspended') {
             user.consumedReceipts.push('ADMIN_SUSPEND_' + Date.now());
-            user.subscriptionExpiresAt = new Date(Date.now() - 1000); // Expire the clock instantly
+            user.subscriptionExpiresAt = new Date(Date.now() - 1000); 
         }
 
         await user.save();
@@ -228,7 +227,6 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE (Enterprise-Grade Protections)
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -236,20 +234,15 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
         let currentStatus = user.subscriptionStatus;
 
-        // 1. Math Check: Has their CLOCK expired?
         if (new Date() > user.subscriptionExpiresAt && currentStatus !== 'suspended') {
             user.subscriptionStatus = 'suspended';
-            // Drop a time barrier for auto-expirations too!
             user.consumedReceipts.push('AUTO_EXPIRE_' + Date.now());
             await user.save();
             currentStatus = 'suspended';
             console.log(`⏳ Subscription Expired for: ${user.businessName}. Account locked.`);
         }
 
-        // 2. 🛠️ ACTIVE RECOVERY: Check Razorpay securely using the TIME BARRIER & PAGINATION FIX
         if (currentStatus === 'suspended') {
-            
-            // 🛡️ Establish the "Time Barrier" (Must be newer than Account Creation OR Admin Suspension)
             let timeBarrier = user.createdAt.getTime();
             user.consumedReceipts.forEach(receipt => {
                 if (receipt.startsWith('ADMIN_SUSPEND_') || receipt.startsWith('AUTO_EXPIRE_')) {
@@ -259,7 +252,6 @@ app.get('/api/business/status/:phone', async (req, res) => {
             });
 
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-            // 🛡️ SECURITY FIX 1: Fetch 100 payments instead of the default 10 to avoid Pagination Blindspots
             const rzpRes = await fetch('https://api.razorpay.com/v1/payments?count=100', {
                 headers: { 'Authorization': `Basic ${auth}` }
             });
@@ -268,25 +260,24 @@ app.get('/api/business/status/:phone', async (req, res) => {
             if (rzpData && rzpData.items) {
                 const recentlyPaid = rzpData.items.find(p => 
                     p.status === 'captured' && 
-                    p.amount >= 10000 && // 🛡️ Ensure they paid at least ₹100! (10000 paise)
-                    p.currency === 'INR' && // 🛡️ SECURITY FIX 2: Strict Currency Lock to prevent Forex exploits
+                    p.amount >= 10000 && 
+                    p.currency === 'INR' && 
                     p.notes && 
                     p.notes.businessPhone === user.phoneNumber && 
                     p.notes.isSubscription === 'true' &&
-                    (p.created_at * 1000) > timeBarrier && // 🛡️ Time Barrier
+                    (p.created_at * 1000) > timeBarrier && 
                     !user.consumedReceipts.includes(p.notes.order_id) 
                 );
 
                 if (recentlyPaid) {
-                    // 🛡️ ATOMIC UPDATE: Protects against double-click race conditions
                     const updatedUser = await User.findOneAndUpdate(
                         { phoneNumber: user.phoneNumber, consumedReceipts: { $ne: recentlyPaid.notes.order_id } },
                         {
                             $set: { 
                                 subscriptionStatus: 'active',
-                                subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // 🗓️ Add 30 Days
+                                subscriptionExpiresAt: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) 
                             },
-                            $push: { consumedReceipts: recentlyPaid.notes.order_id } // 🏦 Lock receipt in vault
+                            $push: { consumedReceipts: recentlyPaid.notes.order_id } 
                         },
                         { new: true }
                     );
@@ -321,24 +312,16 @@ app.post('/api/subscription/pay', async (req, res) => {
 });
 
 // ====================================================================
-// 📊 SAAS ANALYTICS & SETTINGS ENDPOINTS (NEW POLISH FEATURES)
+// 📊 SAAS ANALYTICS & SECURE SETTINGS ENDPOINTS 
 // ====================================================================
 
 app.get('/api/analytics/:businessPhone', async (req, res) => {
     try {
         const phone = req.params.businessPhone;
-        
-        // 1. Total Revenue (sum of paid orders)
         const paidOrders = await Order.find({ businessPhone: phone, status: 'paid' });
         const totalRevenue = paidOrders.reduce((sum, order) => sum + order.totalAmount, 0);
-
-        // 2. Total Orders Count
         const totalOrdersCount = await Order.countDocuments({ businessPhone: phone });
-
-        // 3. Low Stock Alert Count (Less than 5 items left)
         const lowStockCount = await Product.countDocuments({ businessPhone: phone, stockQuantity: { $lt: 5 } });
-
-        // 4. Total Unique Customers Lead Gen
         const uniqueCustomers = await Message.distinct('fromNumber', { businessPhone: phone, direction: 'incoming' });
 
         return res.status(200).json({
@@ -356,18 +339,43 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
     }
 });
 
-app.post('/api/business/settings', async (req, res) => {
+// 🔐 NEW: Request OTP for Settings Updates
+app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
-        const { businessPhone, newBusinessName, newAdminEmail, newPassword } = req.body;
+        const { businessPhone, deliveryMethod } = req.body;
+        const user = await User.findOne({ phoneNumber: businessPhone });
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+
+        await handleOtpDispatch(user, deliveryMethod);
+        return res.status(200).json({ success: true, message: "OTP Sent successfully!" });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// 🔐 NEW: Verify OTP & Save Profile Settings
+app.post('/api/business/settings/verify', async (req, res) => {
+    try {
+        const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword } = req.body;
         const user = await User.findOne({ phoneNumber: businessPhone });
         if (!user) return res.status(404).json({ success: false });
 
+        if (!user.otpCode || user.otpCode !== otp) {
+            return res.status(400).json({ success: false, message: "Invalid OTP." });
+        }
+        if (user.otpExpires < new Date()) {
+            return res.status(400).json({ success: false, message: "OTP has expired." });
+        }
+
+        // Clear OTP
+        user.otpCode = undefined;
+        user.otpExpires = undefined;
+
+        // Apply changes
         if (newBusinessName) user.businessName = newBusinessName;
         if (newAdminEmail) user.adminEmail = newAdminEmail;
         if (newPassword) user.password = newPassword; 
 
         await user.save();
-        return res.status(200).json({ success: true, message: "Settings Updated!" });
+        return res.status(200).json({ success: true, message: "Settings Updated Securely!" });
     } catch (error) {
         return res.status(500).json({ success: false });
     }
@@ -619,7 +627,6 @@ app.post('/razorpay-webhook', async (req, res) => {
             const entity = req.body.payload.payment_link.entity;
             const notes = entity.notes;
             
-            // 🛡️ Ensure we check 'amount_paid' (what cleared the bank) instead of just the invoice amount
             const amountPaid = entity.amount_paid || entity.amount; 
             const paymentCurrency = entity.currency;
             
@@ -627,9 +634,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                 const businessPhone = notes.businessPhone;
                 const subOrderId = notes.order_id;
                 
-                // 🛡️ SECURITY SHIELD: Ensure they paid at least ₹100! (10000 paise) AND they paid in INR!
                 if (amountPaid >= 10000 && paymentCurrency === 'INR') {
-                    // 🛡️ ATOMIC UPDATE: Protects against double-click race conditions from webhook side
                     const updatedUser = await User.findOneAndUpdate(
                         { phoneNumber: businessPhone, consumedReceipts: { $ne: subOrderId } },
                         {
@@ -652,7 +657,6 @@ app.post('/razorpay-webhook', async (req, res) => {
             else {
                 const orderId = notes.order_id; 
                 const order = await Order.findById(orderId);
-                // 🛡️ Same strict checks for physical customer orders
                 if (order && order.status !== 'paid' && amountPaid >= (order.totalAmount * 100) && paymentCurrency === 'INR') {
                     const business = await User.findOne({ phoneNumber: order.businessPhone });
                     order.status = 'paid'; await order.save();
@@ -694,7 +698,6 @@ app.post('/webhook', async (req, res) => {
             
             if (new Date() > businessUser.subscriptionExpiresAt && currentSubStatus !== 'suspended') {
                 businessUser.subscriptionStatus = 'suspended';
-                // Drop a time barrier into the vault for expiration as well!
                 businessUser.consumedReceipts.push('AUTO_EXPIRE_' + Date.now());
                 await businessUser.save();
                 currentSubStatus = 'suspended';
@@ -864,10 +867,8 @@ app.post('/webhook', async (req, res) => {
 setInterval(async () => {
     try {
         console.log("🔍 Scanning for abandoned carts...");
-        // 2 hours ago exactly
         const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
 
-        // Find unpaid orders created MORE than 2 hours ago that haven't gotten a reminder
         const abandonedOrders = await Order.find({
             status: { $ne: 'paid' },
             createdAt: { $lt: twoHoursAgo },
@@ -877,17 +878,15 @@ setInterval(async () => {
         for (let order of abandonedOrders) {
             const business = await User.findOne({ phoneNumber: order.businessPhone });
             
-            // Only send reminder if the business's subscription is active!
             if (business && business.subscriptionStatus === 'active') {
                 let reminderText = `🛒 *Cart Reminder!*\n\nHi! We noticed you left some items in your cart a few hours ago.\n\nYour total is ₹${order.totalAmount}.\n\nReply to this message if you need any help completing your order, or let us know if you'd like to make changes!`;
                 
                 const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, reminderText);
                 
                 if (outboundId) {
-                    order.reminderSent = true; // Mark as sent so we don't spam them!
+                    order.reminderSent = true; 
                     await order.save();
 
-                    // Log it in the chat dashboard
                     const systemReply = await Message.create({ 
                         businessPhone: order.businessPhone, 
                         whatsappId: outboundId || `reply-${Date.now()}`, 
@@ -903,7 +902,7 @@ setInterval(async () => {
     } catch (err) {
         console.error("❌ Abandoned Cart Engine Error:", err);
     }
-}, 30 * 60 * 1000); // Runs in the background every 30 minutes
+}, 30 * 60 * 1000);
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
 server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS 30-DAY TRIAL LIVE]"));
