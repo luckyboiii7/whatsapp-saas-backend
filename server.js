@@ -217,10 +217,9 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
         
         user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
         
-        // 🛡️ TIME BARRIER: If admin suspends manually, drop a timestamp in the vault!
         if (user.subscriptionStatus === 'suspended') {
             user.consumedReceipts.push('ADMIN_SUSPEND_' + Date.now());
-            user.subscriptionExpiresAt = new Date(Date.now() - 1000); // Expire the clock instantly
+            user.subscriptionExpiresAt = new Date(Date.now() - 1000); 
         }
 
         await user.save();
@@ -228,7 +227,6 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE 
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -272,6 +270,7 @@ app.get('/api/business/status/:phone', async (req, res) => {
                 );
 
                 if (recentlyPaid) {
+                    // 🛠️ Mongoose Warning Fix: Changed { new: true } to { returnDocument: 'after' }
                     const updatedUser = await User.findOneAndUpdate(
                         { phoneNumber: user.phoneNumber, consumedReceipts: { $ne: recentlyPaid.notes.order_id } },
                         {
@@ -281,7 +280,7 @@ app.get('/api/business/status/:phone', async (req, res) => {
                             },
                             $push: { consumedReceipts: recentlyPaid.notes.order_id } 
                         },
-                        { new: true }
+                        { returnDocument: 'after' }
                     );
 
                     if (updatedUser) {
@@ -341,7 +340,6 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
     }
 });
 
-// 🔐 Request OTP for Settings Updates
 app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
         const { businessPhone, deliveryMethod } = req.body;
@@ -353,7 +351,6 @@ app.post('/api/business/settings/request-otp', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🔐 Verify OTP & Save Profile Settings (Now supports updating admin phone number)
 app.post('/api/business/settings/verify', async (req, res) => {
     try {
         const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword, newAdminPersonalPhone } = req.body;
@@ -367,15 +364,13 @@ app.post('/api/business/settings/verify', async (req, res) => {
             return res.status(400).json({ success: false, message: "OTP has expired." });
         }
 
-        // Clear OTP
         user.otpCode = undefined;
         user.otpExpires = undefined;
 
-        // Apply changes
         if (newBusinessName) user.businessName = newBusinessName;
         if (newAdminEmail) user.adminEmail = newAdminEmail;
         if (newPassword) user.password = newPassword; 
-        if (newAdminPersonalPhone) user.adminPersonalPhone = newAdminPersonalPhone; // 📱 Saves new personal number
+        if (newAdminPersonalPhone) user.adminPersonalPhone = newAdminPersonalPhone;
 
         await user.save();
         return res.status(200).json({ success: true, message: "Settings Updated Securely!" });
@@ -482,8 +477,9 @@ app.post('/api/messages/send', async (req, res) => {
             io.to(businessPhone).emit('new_message', newMsg);
             return res.status(200).json({ success: true });
         }
-        return res.status(500).json({ success: false });
-    } catch (error) { return res.status(500).json({ success: false }); }
+        // 🛠️ FIX: Proper Error forwarding if Meta Sandbox rejects it
+        return res.status(400).json({ success: false, message: "Meta API rejected message. (Sandbox limit?)" });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error sending message" }); }
 });
 
 app.post('/api/messages/send-media', upload.single('file'), async (req, res) => {
@@ -510,16 +506,18 @@ app.post('/api/messages/send-media', upload.single('file'), async (req, res) => 
             io.to(businessPhone).emit('new_message', newMsg);
             return res.status(200).json({ success: true });
         }
-        return res.status(500).json({ success: false });
-    } catch (error) { return res.status(500).json({ success: false }); }
+        // 🛠️ FIX: Proper Error forwarding
+        return res.status(400).json({ success: false, message: "Meta API rejected media. (Sandbox limit?)" });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server Error" }); }
 });
 
 app.post('/api/bot/toggle', async (req, res) => {
     try {
+        // 🛠️ Mongoose Warning Fix: Changed { upsert: true, new: true } to { upsert: true, returnDocument: 'after' }
         const status = await BotStatus.findOneAndUpdate(
             { businessPhone: req.body.businessPhone, customerPhone: String(req.body.customerPhone) }, 
             { isBotPaused: req.body.isBotPaused, updatedAt: Date.now() }, 
-            { upsert: true, new: true }
+            { upsert: true, returnDocument: 'after' }
         );
         io.to(req.body.businessPhone).emit('bot_status_changed', status);
         return res.status(200).json({ success: true, data: status });
@@ -540,9 +538,11 @@ app.get('/api/rules/:businessPhone', async (req, res) => {
 
 app.post('/api/rules', async (req, res) => {
     try {
+        // 🛠️ Mongoose Warning Fix
         await Rule.findOneAndUpdate(
             { businessPhone: req.body.businessPhone, keyword: req.body.keyword.toLowerCase() }, 
-            { replyText: req.body.replyText }, { upsert: true }
+            { replyText: req.body.replyText }, 
+            { upsert: true, returnDocument: 'after' }
         );
         return res.status(200).json({ success: true });
     } catch (error) { return res.status(500).json({ success: false }); }
@@ -635,6 +635,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                 const subOrderId = notes.order_id;
                 
                 if (amountPaid >= 10000 && paymentCurrency === 'INR') {
+                    // 🛠️ Mongoose Warning Fix: Changed { new: true } to { returnDocument: 'after' }
                     const updatedUser = await User.findOneAndUpdate(
                         { phoneNumber: businessPhone, consumedReceipts: { $ne: subOrderId } },
                         {
@@ -644,7 +645,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                             },
                             $push: { consumedReceipts: subOrderId }
                         },
-                        { new: true }
+                        { returnDocument: 'after' }
                     );
                     if (updatedUser) console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
                 }
