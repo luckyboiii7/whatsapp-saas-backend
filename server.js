@@ -369,6 +369,7 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
     }
 });
 
+// 🔐 Request OTP for Settings Updates
 app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
         const { businessPhone, deliveryMethod } = req.body;
@@ -384,6 +385,7 @@ app.post('/api/business/settings/request-otp', async (req, res) => {
     }
 });
 
+// 🔐 Verify OTP & Save Profile Settings
 app.post('/api/business/settings/verify', async (req, res) => {
     try {
         const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword, newAdminPersonalPhone } = req.body;
@@ -399,9 +401,11 @@ app.post('/api/business/settings/verify', async (req, res) => {
             return res.status(400).json({ success: false, message: "OTP has expired." });
         }
 
+        // Clear OTP
         user.otpCode = undefined;
         user.otpExpires = undefined;
 
+        // Apply changes
         if (newBusinessName) user.businessName = newBusinessName;
         if (newAdminEmail) user.adminEmail = newAdminEmail;
         if (newPassword) user.password = newPassword; 
@@ -507,13 +511,19 @@ app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
     }
 });
 
-// 📌 Fetch Contacts + Their Pinned/Archived statuses
+// 📌 FIXED: Fetch Contacts + Their Pinned/Archived statuses (Now searches BOTH incoming & outgoing)
 app.get('/api/contacts/:businessPhone', async (req, res) => {
     try {
         const contacts = await Message.aggregate([
-            { $match: { businessPhone: req.params.businessPhone, direction: 'incoming' } },
+            // Matches any message associated with this business (incoming or outgoing)
+            { $match: { businessPhone: req.params.businessPhone } }, 
             { $sort: { timestamp: -1 } },
-            { $group: { _id: "$fromNumber", name: { $first: "$customerName" }, lastMessage: { $first: "$body" }}},
+            // Groups by the customer's phone number
+            { $group: { 
+                _id: "$fromNumber", // This stores the customer phone for both directions
+                name: { $first: "$customerName" }, 
+                lastMessage: { $first: "$body" }
+            }},
             { $project: { phone: "$_id", name: 1, lastMessage: 1, _id: 0 } }
         ]);
         
