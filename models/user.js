@@ -13,16 +13,19 @@ const UserSchema = new mongoose.Schema({
     otpCode: { type: String },                            
     otpExpires: { type: Date },                           
 
+    // 💸 SaaS Billing Engine
     subscriptionStatus: { type: String, default: 'trial' }, 
-    
-    // 🏦 THE VAULT: Stores an array of EVERY used receipt so they can NEVER be reused
     consumedReceipts: { type: [String], default: [] }, 
-    
-    // 🗓️ THE CLOCK: Tracks exactly when their current month/trial ends!
     subscriptionExpiresAt: { 
         type: Date, 
-        default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // Auto-sets to 30 days from registration
+        default: () => new Date(Date.now() + 30 * 24 * 60 * 60 * 1000) // Auto-sets to 30 days
     },
+
+    // 📌 NEW: Chat Organization Vault
+    // Stores arrays of customer phone numbers so the UI remembers their state!
+    pinnedChats: { type: [String], default: [] },
+    archivedChats: { type: [String], default: [] },
+    lockedChats: { type: [String], default: [] },
     
     createdAt: { type: Date, default: Date.now }
 });
