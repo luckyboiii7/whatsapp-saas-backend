@@ -217,9 +217,10 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
         
         user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
         
+        // 🛡️ TIME BARRIER: If admin suspends manually, drop a timestamp in the vault!
         if (user.subscriptionStatus === 'suspended') {
             user.consumedReceipts.push('ADMIN_SUSPEND_' + Date.now());
-            user.subscriptionExpiresAt = new Date(Date.now() - 1000); 
+            user.subscriptionExpiresAt = new Date(Date.now() - 1000); // Expire the clock instantly
         }
 
         await user.save();
@@ -227,6 +228,7 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE 
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -339,7 +341,7 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
     }
 });
 
-// 🔐 NEW: Request OTP for Settings Updates
+// 🔐 Request OTP for Settings Updates
 app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
         const { businessPhone, deliveryMethod } = req.body;
@@ -351,10 +353,10 @@ app.post('/api/business/settings/request-otp', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🔐 NEW: Verify OTP & Save Profile Settings
+// 🔐 Verify OTP & Save Profile Settings (Now supports updating admin phone number)
 app.post('/api/business/settings/verify', async (req, res) => {
     try {
-        const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword } = req.body;
+        const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword, newAdminPersonalPhone } = req.body;
         const user = await User.findOne({ phoneNumber: businessPhone });
         if (!user) return res.status(404).json({ success: false });
 
@@ -373,6 +375,7 @@ app.post('/api/business/settings/verify', async (req, res) => {
         if (newBusinessName) user.businessName = newBusinessName;
         if (newAdminEmail) user.adminEmail = newAdminEmail;
         if (newPassword) user.password = newPassword; 
+        if (newAdminPersonalPhone) user.adminPersonalPhone = newAdminPersonalPhone; // 📱 Saves new personal number
 
         await user.save();
         return res.status(200).json({ success: true, message: "Settings Updated Securely!" });
@@ -609,12 +612,10 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
     } catch (error) { return res.status(500).json({ success: false }); }
 });
 
-// 🛠️ ENTERPRISE SECURITY: BULLETPROOF RAZORPAY WEBHOOK WITH DOUBLE-SPEND & FOREX PROTECTION
 app.post('/razorpay-webhook', async (req, res) => {
     console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
         const signature = req.headers['x-razorpay-signature'];
-        
         const bodyToHash = req.rawBody || JSON.stringify(req.body);
         const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(bodyToHash).digest('hex');
         
@@ -626,7 +627,6 @@ app.post('/razorpay-webhook', async (req, res) => {
         if (req.body.event === 'payment_link.paid') {
             const entity = req.body.payload.payment_link.entity;
             const notes = entity.notes;
-            
             const amountPaid = entity.amount_paid || entity.amount; 
             const paymentCurrency = entity.currency;
             
@@ -646,12 +646,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                         },
                         { new: true }
                     );
-
-                    if (updatedUser) {
-                        console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
-                    }
-                } else {
-                    console.log(`❌ SCAM ATTEMPT: ${businessPhone} tried to fake the amount or currency via Webhook!`);
+                    if (updatedUser) console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
                 }
             } 
             else {
@@ -693,7 +688,6 @@ app.post('/webhook', async (req, res) => {
                 return res.status(200).send('EVENT_RECEIVED'); 
             }
 
-            // 🛑 30-DAY TRIAL AUTOMATIC KILL SWITCH
             let currentSubStatus = businessUser.subscriptionStatus;
             
             if (new Date() > businessUser.subscriptionExpiresAt && currentSubStatus !== 'suspended') {
