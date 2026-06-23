@@ -1,3 +1,4 @@
+require('dotenv').config(); // 🔐 NEW: Security module
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -30,12 +31,19 @@ const server = http.createServer(app);
 const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } });
 
 const PORT = process.env.PORT || 3000;
-const MONGO_URI = process.env.MONGO_URI || "your_mongodb_connection_string_here";
 
-// 💸 YOUR RAZORPAY TEST KEYS INTEGRATED
-const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "rzp_test_T4NshlJahTxAUs"; 
-const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "RofcA45NupOB1cLJKtJgbIJj";
-const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET || "wadhwasaas2026";
+// 🔐 SECURE ENVIRONMENT VARIABLES (No more hardcoded keys!)
+const MONGO_URI = process.env.MONGO_URI;
+const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
+const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
+const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
+const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; // Fallback strictly for initial login
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+
+// Startup Security Check
+if (!MONGO_URI || !RAZORPAY_KEY_ID) {
+    console.warn("⚠️ WARNING: Missing critical Environment Variables. Check your .env file or Render dashboard!");
+}
 
 const upload = multer({ dest: os.tmpdir() });
 
@@ -236,8 +244,6 @@ app.post('/api/verify-otp', async (req, res) => {
 // 🚨 SUPER ADMIN "GOD MODE" & SUBSCRIPTION ENDPOINTS
 // ====================================================================
 
-const SUPER_ADMIN_PASS = "masterwadhwa2026"; 
-
 app.post('/api/admin/login', (req, res) => {
     if (req.body.password === SUPER_ADMIN_PASS) {
         return res.status(200).json({ success: true });
@@ -269,7 +275,7 @@ app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     }
 });
 
-// 💸 ACTIVE PAYMENT RECOVERY ENGINE: Checks Razorpay even if the webhook failed!
+// 💸 ACTIVE PAYMENT RECOVERY ENGINE
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
@@ -279,7 +285,6 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
         let currentStatus = user.subscriptionStatus;
 
-        // 1. Math Check: Has the 30 day trial expired?
         if (currentStatus === 'trial') {
             const thirtyDaysInMillis = 30 * 24 * 60 * 60 * 1000;
             if (new Date() > new Date(user.createdAt.getTime() + thirtyDaysInMillis)) {
@@ -290,7 +295,6 @@ app.get('/api/business/status/:phone', async (req, res) => {
             }
         }
 
-        // 2. 🛠️ ACTIVE RECOVERY: If suspended, directly ask Razorpay if they paid!
         if (currentStatus === 'suspended') {
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
             const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
@@ -310,7 +314,7 @@ app.get('/api/business/status/:phone', async (req, res) => {
 
                 if (recentlyPaid) {
                     user.subscriptionStatus = 'active';
-                    user.lastPaymentId = recentlyPaid.notes.order_id; // CONSUME THE RECEIPT!
+                    user.lastPaymentId = recentlyPaid.notes.order_id;
                     await user.save();
                     currentStatus = 'active';
                     console.log(`✅ ACTIVE RECOVERY: Consumed Razorpay payment for ${user.businessName}. UNLOCKING!`);
@@ -369,7 +373,6 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
     }
 });
 
-// 🔐 Request OTP for Settings Updates
 app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
         const { businessPhone, deliveryMethod } = req.body;
@@ -385,7 +388,6 @@ app.post('/api/business/settings/request-otp', async (req, res) => {
     }
 });
 
-// 🔐 Verify OTP & Save Profile Settings
 app.post('/api/business/settings/verify', async (req, res) => {
     try {
         const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword, newAdminPersonalPhone } = req.body;
@@ -401,11 +403,9 @@ app.post('/api/business/settings/verify', async (req, res) => {
             return res.status(400).json({ success: false, message: "OTP has expired." });
         }
 
-        // Clear OTP
         user.otpCode = undefined;
         user.otpExpires = undefined;
 
-        // Apply changes
         if (newBusinessName) user.businessName = newBusinessName;
         if (newAdminEmail) user.adminEmail = newAdminEmail;
         if (newPassword) user.password = newPassword; 
@@ -511,16 +511,14 @@ app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
     }
 });
 
-// 📌 FIXED: Fetch Contacts + Their Pinned/Archived statuses (Now searches BOTH incoming & outgoing)
+// 📌 Fetch Contacts + Their Pinned/Archived statuses 
 app.get('/api/contacts/:businessPhone', async (req, res) => {
     try {
         const contacts = await Message.aggregate([
-            // Matches any message associated with this business (incoming or outgoing)
             { $match: { businessPhone: req.params.businessPhone } }, 
             { $sort: { timestamp: -1 } },
-            // Groups by the customer's phone number
             { $group: { 
-                _id: "$fromNumber", // This stores the customer phone for both directions
+                _id: "$fromNumber", 
                 name: { $first: "$customerName" }, 
                 lastMessage: { $first: "$body" }
             }},
@@ -541,7 +539,6 @@ app.get('/api/contacts/:businessPhone', async (req, res) => {
     }
 });
 
-// 📌 Save Contact Preferences (Pin, Archive, Lock)
 app.post('/api/contacts/preferences', async (req, res) => {
     try {
         const { businessPhone, customerPhone, action } = req.body;
@@ -550,7 +547,6 @@ app.post('/api/contacts/preferences', async (req, res) => {
             return res.status(404).json({ success: false });
         }
 
-        // Toggle Logic
         if (action === 'toggle_pin') {
             if (user.pinnedChats.includes(customerPhone)) {
                 user.pinnedChats = user.pinnedChats.filter(p => p !== customerPhone);
@@ -608,7 +604,7 @@ app.post('/api/messages/send', async (req, res) => {
     }
 });
 
-// 🚀 Meta Template Message Engine (Bypasses 24-hour limit)
+// 🚀 Meta Template Message Engine (Supports English Default)
 app.post('/api/messages/send-template', async (req, res) => {
     try {
         const { businessPhone, phoneNumber, templateName } = req.body;
@@ -623,7 +619,7 @@ app.post('/api/messages/send-template', async (req, res) => {
             messaging_product: "whatsapp", 
             to: phoneNumber, 
             type: "template", 
-            template: { name: templateName, language: { code: "en_US" } } 
+            template: { name: templateName, language: { code: "en" } } 
         };
 
         const response = await fetch(url, { 
@@ -885,8 +881,8 @@ app.post('/razorpay-webhook', async (req, res) => {
 });
 
 app.get('/webhook', (req, res) => {
-    const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
-    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === VERIFY_TOKEN) {
+    const verificationToken = VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
+    if (req.query['hub.mode'] === 'subscribe' && req.query['hub.verify_token'] === verificationToken) {
         return res.status(200).send(req.query['hub.challenge']);
     }
     res.sendStatus(403);
@@ -1117,4 +1113,4 @@ setInterval(async () => {
 }, 30 * 60 * 1000);
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
-server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS 30-DAY TRIAL LIVE]"));
+server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS SECURED]"));
