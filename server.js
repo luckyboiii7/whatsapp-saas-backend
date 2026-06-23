@@ -1,4 +1,4 @@
-require('dotenv').config(); // 🔐 NEW: Security module
+require('dotenv').config(); // Load environment variables
 const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
@@ -32,17 +32,17 @@ const io = new Server(server, { cors: { origin: "*", methods: ["GET", "POST"] } 
 
 const PORT = process.env.PORT || 3000;
 
-// 🔐 SECURE ENVIRONMENT VARIABLES (No more hardcoded keys!)
+// 🔐 SECURE ENVIRONMENT VARIABLES (Pulled from Render)
 const MONGO_URI = process.env.MONGO_URI;
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
-const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; // Fallback strictly for initial login
-const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; // Fallback for initial login
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
 
 // Startup Security Check
 if (!MONGO_URI || !RAZORPAY_KEY_ID) {
-    console.warn("⚠️ WARNING: Missing critical Environment Variables. Check your .env file or Render dashboard!");
+    console.warn("⚠️ WARNING: Missing critical Environment Variables. Check your Render dashboard!");
 }
 
 const upload = multer({ dest: os.tmpdir() });
