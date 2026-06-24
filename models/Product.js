@@ -6,9 +6,12 @@ const productSchema = new mongoose.Schema({
     description: { type: String },
     price: { type: Number, default: 0 },
     
-    // 📦 The New Split Inventory System
+    // 📦 The Split Inventory System
     shopStock: { type: Number, default: 0 },
     godownStock: { type: Number, default: 0 },
+    
+    // ⚖️ The Unit System (kg, litres, pcs, custom)
+    unit: { type: String, default: 'pcs' }, 
     
     imageUrl: { type: String },
     createdAt: { type: Date, default: Date.now }
