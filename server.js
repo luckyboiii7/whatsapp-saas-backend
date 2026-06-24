@@ -10,12 +10,106 @@ const os = require('os');
 const crypto = require('crypto'); 
 const cloudinary = require('cloudinary').v2; 
 
-const Message = require('./models/Message');
-const Rule = require('./models/Rule'); 
-const User = require('./models/user'); 
-const BotStatus = require('./models/BotStatus'); 
-const Order = require('./models/Order'); 
-const Product = require('./models/Product'); 
+// ====================================================================
+// 💾 DATABASE SCHEMAS & MODELS
+// ====================================================================
+
+const UserSchema = new mongoose.Schema({
+    businessName: { type: String, required: true },
+    phoneNumber: { type: String, required: true, unique: true },
+    password: { type: String, required: true },
+    metaPhoneId: { type: String, required: true },
+    metaToken: { type: String, required: true },
+    adminEmail: { type: String, required: true },
+    adminPersonalPhone: { type: String, required: true },
+    subscriptionStatus: { type: String, default: 'trial', enum: ['trial', 'active', 'suspended'] },
+    lastPaymentId: { type: String },
+    subscriptionExpiresAt: { type: Date },
+    consumedReceipts: [{ type: String }],
+    otpCode: { type: String },
+    otpExpires: { type: Date },
+    pinnedChats: [{ type: String }],
+    archivedChats: [{ type: String }],
+    lockedChats: [{ type: String }],
+    createdAt: { type: Date, default: Date.now }
+});
+const User = mongoose.models.User || mongoose.model('User', UserSchema);
+
+const MessageSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    whatsappId: { type: String, required: true },
+    fromNumber: { type: String, required: true },
+    customerName: { type: String, default: 'Customer' },
+    body: { type: String, required: true },
+    direction: { type: String, enum: ['incoming', 'outgoing'], required: true },
+    timestamp: { type: Date, default: Date.now }
+});
+const Message = mongoose.models.Message || mongoose.model('Message', MessageSchema);
+
+const RuleSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    keyword: { type: String, required: true },
+    replyText: { type: String, required: true },
+    createdAt: { type: Date, default: Date.now }
+});
+const Rule = mongoose.models.Rule || mongoose.model('Rule', RuleSchema);
+
+const BotStatusSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    customerPhone: { type: String, required: true },
+    isBotPaused: { type: Boolean, default: false },
+    updatedAt: { type: Date, default: Date.now }
+});
+const BotStatus = mongoose.models.BotStatus || mongoose.model('BotStatus', BotStatusSchema);
+
+const ProductSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    name: { type: String, required: true },
+    description: { type: String },
+    price: { type: Number, default: 0 },
+    shopStock: { type: Number, default: 0 },
+    godownStock: { type: Number, default: 0 },
+    unit: { type: String, default: 'pcs' }, 
+    imageUrl: { type: String },
+    createdAt: { type: Date, default: Date.now }
+});
+const Product = mongoose.models.Product || mongoose.model('Product', ProductSchema);
+
+const OrderSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    customerPhone: { type: String, required: true },
+    items: [{
+        name: { type: String },
+        quantity: { type: Number },
+        price: { type: Number }
+    }],
+    totalAmount: { type: Number, required: true },
+    routingMode: { type: String, default: 'instant_pay' },
+    status: { type: String, default: 'pending', enum: ['pending', 'pending_quote', 'pending_payment', 'paid', 'cancelled'] },
+    reminderSent: { type: Boolean, default: false },
+    createdAt: { type: Date, default: Date.now }
+});
+const Order = mongoose.models.Order || mongoose.model('Order', OrderSchema);
+
+const PartySchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    name: { type: String, required: true },
+    phone: { type: String, required: true },
+    balance: { type: Number, default: 0 }, 
+    createdAt: { type: Date, default: Date.now }
+});
+const Party = mongoose.models.Party || mongoose.model('Party', PartySchema);
+
+const LedgerTxSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
+    partyId: { type: String, required: true },
+    type: { type: String, enum: ['bill', 'payment'], required: true }, 
+    amount: { type: Number, required: true },
+    description: { type: String },
+    imageUrl: { type: String }, 
+    date: { type: Date, default: Date.now }
+});
+const LedgerTx = mongoose.models.LedgerTx || mongoose.model('LedgerTx', LedgerTxSchema);
 
 const app = express();
 app.use(cors()); 
@@ -37,10 +131,9 @@ const MONGO_URI = process.env.MONGO_URI;
 const RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID;
 const RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET;
 const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
-const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; // Fallback for initial login
+const SUPER_ADMIN_PASS = process.env.SUPER_ADMIN_PASS || "masterwadhwa2026"; 
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN || "kesh_whatsapp_saas_secret_token_2026";
 
-// Startup Security Check
 if (!MONGO_URI || !RAZORPAY_KEY_ID) {
     console.warn("⚠️ WARNING: Missing critical Environment Variables. Check your Render dashboard!");
 }
@@ -71,14 +164,10 @@ async function generateRazorpayLink(amount, referenceId, customerPhone, isSubscr
     try {
         const payload = {
             amount: Math.round(amount * 100), currency: "INR",
-            description: isSubscription ? "Monthly SaaS Subscription (Wadhwa Software)" : `Payment for Order #${referenceId.substring(0, 6)}`,
+            description: isSubscription ? "Monthly SaaS Subscription" : `Payment for Order #${referenceId.substring(0, 6)}`,
             customer: { contact: customerPhone },
             notify: { sms: false, email: false },
-            notes: { 
-                order_id: referenceId, 
-                isSubscription: isSubscription ? 'true' : 'false', 
-                businessPhone: businessPhone 
-            }
+            notes: { order_id: referenceId, isSubscription: isSubscription ? 'true' : 'false', businessPhone: businessPhone }
         };
 
         if (callbackUrl) {
@@ -119,7 +208,6 @@ async function sendWhatsAppMessage(metaPhoneId, metaToken, toPhoneNumber, messag
         if (response.ok) return data.messages[0].id;
         return null;
     } catch (error) { 
-        console.error("Meta Send Error:", error);
         return null; 
     }
 }
@@ -129,9 +217,7 @@ async function validateMetaKeys(phoneId, token) {
         const response = await fetch(`https://graph.facebook.com/v20.0/${phoneId}`, { headers: { 'Authorization': `Bearer ${token}` } });
         const data = await response.json();
         return !data.error; 
-    } catch (e) { 
-        return false; 
-    }
+    } catch (e) { return false; }
 }
 
 async function handleOtpDispatch(user, deliveryMethod) {
@@ -145,9 +231,29 @@ async function handleOtpDispatch(user, deliveryMethod) {
     } else {
         const msg = `🔐 *Security Alert*\nYour WhatsApp SaaS OTP is: *${otp}*.\nDo not share this with anyone. Valid for 10 mins.`;
         await sendWhatsAppMessage(user.metaPhoneId, user.metaToken, user.adminPersonalPhone, msg);
-        console.log(`\n\n📱 [WHATSAPP OTP INITIATED] To: ${user.adminPersonalPhone} | OTP CODE: ${otp}\n\n`);
     }
     return true;
+}
+
+// Option C Godown Inventory Engine
+async function processInventoryDeduction(businessPhone, items) {
+    for (let item of items) { 
+        const dbProduct = await Product.findOne({ businessPhone, name: item.name });
+        if (dbProduct) {
+            dbProduct.shopStock = (dbProduct.shopStock || 0) - item.quantity;
+            await dbProduct.save();
+            
+            if (dbProduct.shopStock <= 0) {
+                const alertMsg = await Message.create({ 
+                    businessPhone, whatsappId: `alert-${Date.now()}`, 
+                    fromNumber: businessPhone, customerName: "System Godown Alert", 
+                    body: `[🚨 GODOWN ALERT] ${item.name} is out of Shop Stock! (Current: ${dbProduct.shopStock} ${dbProduct.unit || 'pcs'}). Please transfer units from Godown.`, 
+                    direction: 'incoming' 
+                });
+                io.to(businessPhone).emit('new_message', alertMsg);
+            }
+        }
+    }
 }
 
 // ====================================================================
@@ -157,87 +263,53 @@ async function handleOtpDispatch(user, deliveryMethod) {
 app.post('/api/register', async (req, res) => {
     try {
         const { businessName, phoneNumber, password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone } = req.body;
-
         let user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        if (user) {
-            return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
-        }
+        if (user) return res.status(400).json({ success: false, message: "Phone number already registered. Please go to login." });
 
         const keysValid = await validateMetaKeys(metaPhoneId, metaToken);
-        if (!keysValid) {
-            return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
-        }
+        if (!keysValid) return res.status(400).json({ success: false, message: "Invalid Meta Keys. Registration rejected by Facebook." });
 
         user = await User.create({ businessName, phoneNumber: String(phoneNumber), password, metaPhoneId, metaToken, adminEmail, adminPersonalPhone });
         return res.status(201).json({ success: true, message: "Account securely created!", user });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error" }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
 app.post('/api/login', async (req, res) => {
     try {
         const { phoneNumber, password, deliveryMethod } = req.body;
         const user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        
-        if (!user) {
-            return res.status(404).json({ success: false, message: "Business not found." });
-        }
-        if (user.password !== password) {
-            return res.status(401).json({ success: false, message: "Incorrect password." });
-        }
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+        if (user.password !== password) return res.status(401).json({ success: false, message: "Incorrect password." });
 
         await handleOtpDispatch(user, deliveryMethod);
         return res.status(200).json({ success: true, requiresOtp: true, message: "OTP Sent" });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error" }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
 app.post('/api/forgot-password', async (req, res) => {
     try {
         const { phoneNumber, deliveryMethod } = req.body;
         const user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        
-        if (!user) {
-            return res.status(404).json({ success: false, message: "Business not found." });
-        }
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
 
         await handleOtpDispatch(user, deliveryMethod);
         return res.status(200).json({ success: true, message: "OTP Sent" });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error" }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
 app.post('/api/verify-otp', async (req, res) => {
     try {
         const { phoneNumber, otp, newPassword } = req.body;
         const user = await User.findOne({ phoneNumber: String(phoneNumber) });
-        
-        if (!user) {
-            return res.status(404).json({ success: false, message: "Business not found." });
-        }
-        
-        if (!user.otpCode || user.otpCode !== otp) {
-            return res.status(400).json({ success: false, message: "Invalid OTP." });
-        }
-        if (user.otpExpires < new Date()) {
-            return res.status(400).json({ success: false, message: "OTP expired. Please try again." });
-        }
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
+        if (!user.otpCode || user.otpCode !== otp || user.otpExpires < new Date()) return res.status(400).json({ success: false, message: "Invalid or expired OTP." });
 
         user.otpCode = undefined;
         user.otpExpires = undefined;
-
-        if (newPassword) {
-            user.password = newPassword;
-        }
-        
+        if (newPassword) user.password = newPassword;
         await user.save();
         return res.status(200).json({ success: true, message: "Verified successfully!", user });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error" }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error" }); }
 });
 
 // ====================================================================
@@ -245,9 +317,7 @@ app.post('/api/verify-otp', async (req, res) => {
 // ====================================================================
 
 app.post('/api/admin/login', (req, res) => {
-    if (req.body.password === SUPER_ADMIN_PASS) {
-        return res.status(200).json({ success: true });
-    }
+    if (req.body.password === SUPER_ADMIN_PASS) return res.status(200).json({ success: true });
     return res.status(401).json({ success: false, message: "Unauthorized" });
 });
 
@@ -255,33 +325,24 @@ app.get('/api/admin/users', async (req, res) => {
     try {
         const users = await User.find({}, 'businessName phoneNumber adminEmail adminPersonalPhone subscriptionStatus createdAt metaPhoneId');
         return res.status(200).json({ success: true, data: users });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/admin/users/:id/toggle-suspend', async (req, res) => {
     try {
         const user = await User.findById(req.params.id);
-        if (!user) {
-            return res.status(404).json({ success: false });
-        }
-        
+        if (!user) return res.status(404).json({ success: false });
         user.subscriptionStatus = user.subscriptionStatus === 'suspended' ? 'active' : 'suspended';
         await user.save();
         return res.status(200).json({ success: true, status: user.subscriptionStatus });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 // 💸 ACTIVE PAYMENT RECOVERY ENGINE
 app.get('/api/business/status/:phone', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.params.phone });
-        if (!user) {
-            return res.status(404).json({ success: false });
-        }
+        if (!user) return res.status(404).json({ success: false });
 
         let currentStatus = user.subscriptionStatus;
 
@@ -291,15 +352,12 @@ app.get('/api/business/status/:phone', async (req, res) => {
                 user.subscriptionStatus = 'suspended';
                 await user.save();
                 currentStatus = 'suspended';
-                console.log(`⏳ Trial Expired for: ${user.businessName}. Account locked.`);
             }
         }
 
         if (currentStatus === 'suspended') {
             const auth = Buffer.from(`${RAZORPAY_KEY_ID}:${RAZORPAY_KEY_SECRET}`).toString('base64');
-            const rzpRes = await fetch('https://api.razorpay.com/v1/payments', {
-                headers: { 'Authorization': `Basic ${auth}` }
-            });
+            const rzpRes = await fetch('https://api.razorpay.com/v1/payments', { headers: { 'Authorization': `Basic ${auth}` } });
             const rzpData = await rzpRes.json();
             
             if (rzpData && rzpData.items) {
@@ -317,32 +375,21 @@ app.get('/api/business/status/:phone', async (req, res) => {
                     user.lastPaymentId = recentlyPaid.notes.order_id;
                     await user.save();
                     currentStatus = 'active';
-                    console.log(`✅ ACTIVE RECOVERY: Consumed Razorpay payment for ${user.businessName}. UNLOCKING!`);
                 }
             }
         }
-
         return res.status(200).json({ success: true, status: currentStatus });
-    } catch (error) { 
-        console.error("Status Check Error:", error);
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/subscription/pay', async (req, res) => {
     try {
         const user = await User.findOne({ phoneNumber: req.body.businessPhone });
-        if (!user) {
-            return res.status(404).json({ success: false });
-        }
+        if (!user) return res.status(404).json({ success: false });
 
         const paymentLink = await generateRazorpayLink(100, "SUB_" + Date.now(), user.adminPersonalPhone, true, user.phoneNumber, req.body.callbackUrl);
-        
         return res.status(200).json({ success: true, url: paymentLink });
-    } catch (error) { 
-        console.error("Payment Link Error:", error);
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 // ====================================================================
@@ -355,52 +402,35 @@ app.get('/api/analytics/:businessPhone', async (req, res) => {
         const paidOrders = await Order.find({ businessPhone: phone, status: 'paid' });
         const totalRevenue = paidOrders.reduce((sum, order) => sum + order.totalAmount, 0);
         const totalOrdersCount = await Order.countDocuments({ businessPhone: phone });
-        const lowStockCount = await Product.countDocuments({ businessPhone: phone, stockQuantity: { $lt: 5 } });
+        const lowStockCount = await Product.countDocuments({ businessPhone: phone, shopStock: { $lt: 5 } }); 
         const uniqueCustomers = await Message.distinct('fromNumber', { businessPhone: phone, direction: 'incoming' });
 
         return res.status(200).json({
             success: true,
-            data: {
-                totalRevenue,
-                totalOrdersCount,
-                lowStockCount,
-                totalContacts: uniqueCustomers.length
-            }
+            data: { totalRevenue, totalOrdersCount, lowStockCount, totalContacts: uniqueCustomers.length }
         });
-    } catch (error) {
-        console.error("Analytics Error:", error);
-        return res.status(500).json({ success: false });
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/business/settings/request-otp', async (req, res) => {
     try {
         const { businessPhone, deliveryMethod } = req.body;
         const user = await User.findOne({ phoneNumber: businessPhone });
-        if (!user) {
-            return res.status(404).json({ success: false, message: "Business not found." });
-        }
+        if (!user) return res.status(404).json({ success: false, message: "Business not found." });
 
         await handleOtpDispatch(user, deliveryMethod);
         return res.status(200).json({ success: true, message: "OTP Sent successfully!" });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/business/settings/verify', async (req, res) => {
     try {
         const { businessPhone, otp, newBusinessName, newAdminEmail, newPassword, newAdminPersonalPhone } = req.body;
         const user = await User.findOne({ phoneNumber: businessPhone });
-        if (!user) {
-            return res.status(404).json({ success: false });
-        }
+        if (!user) return res.status(404).json({ success: false });
 
-        if (!user.otpCode || user.otpCode !== otp) {
-            return res.status(400).json({ success: false, message: "Invalid OTP." });
-        }
-        if (user.otpExpires < new Date()) {
-            return res.status(400).json({ success: false, message: "OTP has expired." });
+        if (!user.otpCode || user.otpCode !== otp || user.otpExpires < new Date()) {
+            return res.status(400).json({ success: false, message: "Invalid or expired OTP." });
         }
 
         user.otpCode = undefined;
@@ -413,9 +443,7 @@ app.post('/api/business/settings/verify', async (req, res) => {
 
         await user.save();
         return res.status(200).json({ success: true, message: "Settings Updated Securely!" });
-    } catch (error) {
-        return res.status(500).json({ success: false });
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 // ====================================================================
@@ -425,10 +453,12 @@ app.post('/api/business/settings/verify', async (req, res) => {
 async function sendWhatsAppButtons(metaPhoneId, metaToken, toPhoneNumber, bodyText, buttonsArray) {
     if (!metaToken || !metaPhoneId || buttonsArray.length === 0) return null;
     const url = `https://graph.facebook.com/v20.0/${metaPhoneId}/messages`;
+    
     const formattedButtons = buttonsArray.slice(0, 3).map((btn, index) => ({ 
         type: "reply", 
         reply: { id: btn.id || `btn_${index}`, title: btn.title.substring(0, 20) } 
     }));
+
     const payload = { 
         messaging_product: "whatsapp", 
         recipient_type: "individual", 
@@ -436,14 +466,13 @@ async function sendWhatsAppButtons(metaPhoneId, metaToken, toPhoneNumber, bodyTe
         type: "interactive", 
         interactive: { type: "button", body: { text: bodyText }, action: { buttons: formattedButtons } } 
     };
+
     try {
         const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${metaToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await response.json();
         if (response.ok) return data.messages[0].id;
         return null;
-    } catch (error) { 
-        return null; 
-    }
+    } catch (error) { return null; }
 }
 
 async function uploadMediaToWhatsApp(metaPhoneId, metaToken, filePath, mimeType, originalName) {
@@ -454,13 +483,12 @@ async function uploadMediaToWhatsApp(metaPhoneId, metaToken, filePath, mimeType,
     const formData = new FormData();
     formData.append('file', fileBlob, originalName);
     formData.append('messaging_product', 'whatsapp');
+    
     try {
         const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${metaToken}` }, body: formData });
         const data = await response.json();
         return data.id; 
-    } catch (error) { 
-        return null; 
-    }
+    } catch (error) { return null; }
 }
 
 async function sendWhatsAppMediaId(metaPhoneId, metaToken, toPhoneNumber, mediaId, mediaType, caption = "", filename = "") {
@@ -481,23 +509,17 @@ async function sendWhatsAppMediaId(metaPhoneId, metaToken, toPhoneNumber, mediaI
         const data = await response.json();
         if (response.ok) return data.messages[0].id;
         return null;
-    } catch (error) { 
-        return null; 
-    }
+    } catch (error) { return null; }
 }
 
 app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
     try {
         const business = await User.findOne({ phoneNumber: req.params.businessPhone });
-        if (!business) {
-            return res.status(404).send('Business not found');
-        }
+        if (!business) return res.status(404).send('Business not found');
 
         const metaRes = await fetch(`https://graph.facebook.com/v20.0/${req.params.mediaId}`, { headers: { 'Authorization': `Bearer ${business.metaToken}` }});
         const metaData = await metaRes.json();
-        if (!metaData.url) {
-            return res.status(404).send('Media not found');
-        }
+        if (!metaData.url) return res.status(404).send('Media not found');
 
         const fileRes = await fetch(metaData.url, { headers: { 'Authorization': `Bearer ${business.metaToken}` }});
         const arrayBuffer = await fileRes.arrayBuffer();
@@ -505,28 +527,19 @@ app.get('/api/media/:businessPhone/:mediaId', async (req, res) => {
         
         res.setHeader('Content-Type', metaData.mime_type);
         return res.send(buffer);
-    } catch (error) {
-        console.error("Media Fetch Error:", error);
-        return res.status(500).send('Error Fetching Media');
-    }
+    } catch (error) { return res.status(500).send('Error Fetching Media'); }
 });
 
-// 📌 Fetch Contacts + Their Pinned/Archived statuses 
 app.get('/api/contacts/:businessPhone', async (req, res) => {
     try {
         const contacts = await Message.aggregate([
             { $match: { businessPhone: req.params.businessPhone } }, 
             { $sort: { timestamp: -1 } },
-            { $group: { 
-                _id: "$fromNumber", 
-                name: { $first: "$customerName" }, 
-                lastMessage: { $first: "$body" }
-            }},
+            { $group: { _id: "$fromNumber", name: { $first: "$customerName" }, lastMessage: { $first: "$body" }}},
             { $project: { phone: "$_id", name: 1, lastMessage: 1, _id: 0 } }
         ]);
         
         const user = await User.findOne({ phoneNumber: req.params.businessPhone });
-        
         return res.status(200).json({ 
             success: true, 
             contacts: contacts,
@@ -534,62 +547,39 @@ app.get('/api/contacts/:businessPhone', async (req, res) => {
             archivedChats: user ? user.archivedChats : [],
             lockedChats: user ? user.lockedChats : []
         });
-    } catch (e) { 
-        return res.status(500).json({ success: false, message: e.message }); 
-    }
+    } catch (e) { return res.status(500).json({ success: false, message: e.message }); }
 });
 
 app.post('/api/contacts/preferences', async (req, res) => {
     try {
         const { businessPhone, customerPhone, action } = req.body;
         const user = await User.findOne({ phoneNumber: businessPhone });
-        if (!user) {
-            return res.status(404).json({ success: false });
-        }
+        if (!user) return res.status(404).json({ success: false });
 
         if (action === 'toggle_pin') {
-            if (user.pinnedChats.includes(customerPhone)) {
-                user.pinnedChats = user.pinnedChats.filter(p => p !== customerPhone);
-            } else {
-                user.pinnedChats.push(customerPhone);
-            }
+            user.pinnedChats.includes(customerPhone) ? user.pinnedChats = user.pinnedChats.filter(p => p !== customerPhone) : user.pinnedChats.push(customerPhone);
         } else if (action === 'toggle_archive') {
-            if (user.archivedChats.includes(customerPhone)) {
-                user.archivedChats = user.archivedChats.filter(p => p !== customerPhone);
-            } else {
-                user.archivedChats.push(customerPhone);
-            }
+            user.archivedChats.includes(customerPhone) ? user.archivedChats = user.archivedChats.filter(p => p !== customerPhone) : user.archivedChats.push(customerPhone);
         } else if (action === 'toggle_lock') {
-            if (user.lockedChats.includes(customerPhone)) {
-                user.lockedChats = user.lockedChats.filter(p => p !== customerPhone);
-            } else {
-                user.lockedChats.push(customerPhone);
-            }
+            user.lockedChats.includes(customerPhone) ? user.lockedChats = user.lockedChats.filter(p => p !== customerPhone) : user.lockedChats.push(customerPhone);
         }
-
         await user.save();
         return res.status(200).json({ success: true });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/messages/:businessPhone/:customerPhone', async (req, res) => {
     try {
         const chatHistory = await Message.find({ businessPhone: req.params.businessPhone, fromNumber: String(req.params.customerPhone) }).sort({ timestamp: 1 });
         return res.status(200).json({ success: true, data: chatHistory });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/messages/send', async (req, res) => {
     try {
         const { businessPhone, phoneNumber, message } = req.body;
         const business = await User.findOne({ phoneNumber: businessPhone });
-        if (!business) {
-            return res.status(404).json({ success: false, message: "Business not found" });
-        }
+        if (!business) return res.status(404).json({ success: false, message: "Business not found" });
 
         const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, phoneNumber, message);
         if (outboundId) {
@@ -597,37 +587,20 @@ app.post('/api/messages/send', async (req, res) => {
             io.to(businessPhone).emit('new_message', newMsg);
             return res.status(200).json({ success: true });
         }
-        
-        return res.status(400).json({ success: false, message: "Meta API rejected message. (Sandbox limit or past 24 hours?)" });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error sending message" }); 
-    }
+        return res.status(400).json({ success: false, message: "Meta API rejected message." });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error sending message" }); }
 });
 
-// 🚀 Meta Template Message Engine (Supports English Default)
 app.post('/api/messages/send-template', async (req, res) => {
     try {
         const { businessPhone, phoneNumber, templateName } = req.body;
         const business = await User.findOne({ phoneNumber: businessPhone });
-        if (!business) {
-            return res.status(404).json({ success: false, message: "Business not found" });
-        }
+        if (!business) return res.status(404).json({ success: false, message: "Business not found" });
 
         const url = `https://graph.facebook.com/v20.0/${business.metaPhoneId}/messages`;
-        
-        const payload = { 
-            messaging_product: "whatsapp", 
-            to: phoneNumber, 
-            type: "template", 
-            template: { name: templateName, language: { code: "en" } } 
-        };
+        const payload = { messaging_product: "whatsapp", to: phoneNumber, type: "template", template: { name: templateName, language: { code: "en" } } };
 
-        const response = await fetch(url, { 
-            method: 'POST', 
-            headers: { 'Authorization': `Bearer ${business.metaToken}`, 'Content-Type': 'application/json' }, 
-            body: JSON.stringify(payload) 
-        });
-        
+        const response = await fetch(url, { method: 'POST', headers: { 'Authorization': `Bearer ${business.metaToken}`, 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
         const data = await response.json();
 
         if (response.ok) {
@@ -636,23 +609,17 @@ app.post('/api/messages/send-template', async (req, res) => {
             return res.status(200).json({ success: true });
         }
         return res.status(400).json({ success: false, message: data.error?.message || "Meta API rejected template." });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server error sending template" }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false, message: "Server error sending template" }); }
 });
 
 app.post('/api/messages/send-media', upload.single('file'), async (req, res) => {
     try {
         const { businessPhone, phoneNumber, caption } = req.body;
         const file = req.file;
-        if (!file) {
-            return res.status(400).json({ success: false, message: "No file provided" });
-        }
+        if (!file) return res.status(400).json({ success: false, message: "No file provided" });
 
         const business = await User.findOne({ phoneNumber: businessPhone });
-        if (!business) {
-            return res.status(404).json({ success: false, message: "Business not found" });
-        }
+        if (!business) return res.status(404).json({ success: false, message: "Business not found" });
 
         const isImage = file.mimetype.startsWith('image/');
         const mediaType = isImage ? 'image' : 'document';
@@ -660,9 +627,7 @@ app.post('/api/messages/send-media', upload.single('file'), async (req, res) => 
         const mediaId = await uploadMediaToWhatsApp(business.metaPhoneId, business.metaToken, file.path, file.mimetype, file.originalname);
         fs.unlinkSync(file.path);
 
-        if (!mediaId) {
-            return res.status(500).json({ success: false, message: "Failed to upload to Meta" });
-        }
+        if (!mediaId) return res.status(500).json({ success: false, message: "Failed to upload to Meta" });
 
         const outboundId = await sendWhatsAppMediaId(business.metaPhoneId, business.metaToken, phoneNumber, mediaId, mediaType, caption, file.originalname);
 
@@ -671,11 +636,8 @@ app.post('/api/messages/send-media', upload.single('file'), async (req, res) => 
             io.to(businessPhone).emit('new_message', newMsg);
             return res.status(200).json({ success: true });
         }
-        
-        return res.status(400).json({ success: false, message: "Meta API rejected media. (Sandbox limit?)" });
-    } catch (error) { 
-        return res.status(500).json({ success: false, message: "Server Error" }); 
-    }
+        return res.status(400).json({ success: false, message: "Meta API rejected media." });
+    } catch (error) { return res.status(500).json({ success: false, message: "Server Error" }); }
 });
 
 // ====================================================================
@@ -684,97 +646,93 @@ app.post('/api/messages/send-media', upload.single('file'), async (req, res) => 
 
 app.post('/api/bot/toggle', async (req, res) => {
     try {
-        const status = await BotStatus.findOneAndUpdate(
-            { businessPhone: req.body.businessPhone, customerPhone: String(req.body.customerPhone) }, 
-            { isBotPaused: req.body.isBotPaused, updatedAt: Date.now() }, 
-            { upsert: true, returnDocument: 'after' }
-        );
+        const status = await BotStatus.findOneAndUpdate({ businessPhone: req.body.businessPhone, customerPhone: String(req.body.customerPhone) }, { isBotPaused: req.body.isBotPaused, updatedAt: Date.now() }, { upsert: true, returnDocument: 'after' });
         io.to(req.body.businessPhone).emit('bot_status_changed', status);
         return res.status(200).json({ success: true, data: status });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/bot/status/:businessPhone/:customerPhone', async (req, res) => {
     try {
         const status = await BotStatus.findOne({ businessPhone: req.params.businessPhone, customerPhone: String(req.params.customerPhone) });
         return res.status(200).json({ success: true, isBotPaused: status ? status.isBotPaused : false });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/rules/:businessPhone', async (req, res) => {
     try { 
         const rules = await Rule.find({ businessPhone: req.params.businessPhone });
         return res.status(200).json({ success: true, data: rules }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/rules', async (req, res) => {
     try {
-        await Rule.findOneAndUpdate(
-            { businessPhone: req.body.businessPhone, keyword: req.body.keyword.toLowerCase() }, 
-            { replyText: req.body.replyText }, 
-            { upsert: true, returnDocument: 'after' }
-        );
+        await Rule.findOneAndUpdate({ businessPhone: req.body.businessPhone, keyword: req.body.keyword.toLowerCase() }, { replyText: req.body.replyText }, { upsert: true, returnDocument: 'after' });
         return res.status(200).json({ success: true });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// RESTORED RULE DELETION 🛠️
+app.delete('/api/rules/:id', async (req, res) => {
+    try {
+        await Rule.findByIdAndDelete(req.params.id);
+        return res.status(200).json({ success: true });
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/catalog/upload-image', upload.single('file'), async (req, res) => {
     try {
-        if (!req.file) {
-            return res.status(400).json({ success: false, message: "No file uploaded" });
-        }
+        if (!req.file) return res.status(400).json({ success: false, message: "No file uploaded" });
         const result = await cloudinary.uploader.upload(req.file.path, { folder: "whatsapp_saas_catalog" });
-        fs.unlinkSync(req.file.path);
-        
+        fs.unlinkSync(req.file.path); 
         return res.status(200).json({ success: true, imageUrl: result.secure_url });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/products/:businessPhone', async (req, res) => {
     try { 
         const products = await Product.find({ businessPhone: req.params.businessPhone }).sort({ createdAt: -1 });
         return res.status(200).json({ success: true, data: products }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/products', async (req, res) => {
     try { 
         const product = await Product.create(req.body);
         return res.status(201).json({ success: true, data: product }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// RESTORED PRODUCT EDITING 🛠️
+app.put('/api/products/:id', async (req, res) => {
+    try {
+        const updatedProduct = await Product.findByIdAndUpdate(req.params.id, req.body, { new: true });
+        return res.status(200).json({ success: true, data: updatedProduct });
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.delete('/api/products/:id', async (req, res) => {
     try { 
         await Product.findByIdAndDelete(req.params.id); 
         return res.status(200).json({ success: true }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.get('/api/orders/:businessPhone', async (req, res) => {
     try { 
         const orders = await Order.find({ businessPhone: req.params.businessPhone }).sort({ createdAt: -1 });
         return res.status(200).json({ success: true, data: orders }); 
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// RESTORED MANUAL ORDER CREATION 🛠️
+app.post('/api/orders', async (req, res) => {
+    try {
+        const order = await Order.create(req.body);
+        io.to(order.businessPhone).emit('order_created', order);
+        return res.status(201).json({ success: true, data: order });
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
 app.post('/api/orders/:id/send-invoice', async (req, res) => {
@@ -788,16 +746,16 @@ app.post('/api/orders/:id/send-invoice', async (req, res) => {
         io.to(order.businessPhone).emit('order_updated', order);
         
         const paymentLink = await generateRazorpayLink(order.totalAmount, String(order._id), order.customerPhone);
-        const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `🧾 Good news! Your custom quotation is ready.\n\nYour final total is ₹${req.body.newTotal}.\n\nSecure Payment Link:\n${paymentLink}`);
         
+        const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `🧾 Good news! Your custom quotation is ready.\n\nYour final total is ₹${req.body.newTotal}.\n\nSecure Payment Link:\n${paymentLink}`);
         const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Final Invoice Link: ₹${req.body.newTotal}]`, direction: 'outgoing' });
         io.to(order.businessPhone).emit('new_message', systemReply);
+        
         return res.status(200).json({ success: true, data: order });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
 });
 
+// 🚀 OPTION C INVENTORY ENGINE (MANUAL OVERRIDE)
 app.post('/api/orders/:id/mark-paid', async (req, res) => {
     try {
         const order = await Order.findById(req.params.id);
@@ -807,34 +765,110 @@ app.post('/api/orders/:id/mark-paid', async (req, res) => {
         await order.save(); 
         io.to(order.businessPhone).emit('order_updated', order);
         
-        for (let item of order.items) { 
-            await Product.findOneAndUpdate({ businessPhone: order.businessPhone, name: item.name }, { $inc: { stockQuantity: -item.quantity } }); 
-        }
+        await processInventoryDeduction(order.businessPhone, order.items);
 
         const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `✅ Payment received! Your order is now confirmed and is being processed for dispatch. Thank you!`);
         const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Payment Receipt]`, direction: 'outgoing' });
         io.to(order.businessPhone).emit('new_message', systemReply);
+        
         return res.status(200).json({ success: true, data: order });
-    } catch (error) { 
-        return res.status(500).json({ success: false }); 
-    }
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+// ====================================================================
+// 📔 FINANCES & LEDGER (VYAPAR CLONE)
+// ====================================================================
+app.get('/api/ledger/parties/:businessPhone', async (req, res) => {
+    try {
+        const parties = await Party.find({ businessPhone: req.params.businessPhone }).sort({ name: 1 });
+        return res.status(200).json({ success: true, data: parties });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.post('/api/ledger/parties', async (req, res) => {
+    try {
+        const party = await Party.create(req.body);
+        return res.status(201).json({ success: true, data: party });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.delete('/api/ledger/parties/:id', async (req, res) => {
+    try {
+        await Party.findByIdAndDelete(req.params.id);
+        await LedgerTx.deleteMany({ partyId: req.params.id }); 
+        return res.status(200).json({ success: true });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.get('/api/ledger/transactions/:partyId', async (req, res) => {
+    try {
+        const txs = await LedgerTx.find({ partyId: req.params.partyId }).sort({ date: -1 });
+        return res.status(200).json({ success: true, data: txs });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.post('/api/ledger/transactions', async (req, res) => {
+    try {
+        const { businessPhone, partyId, type, amount, description, imageUrl } = req.body;
+        const tx = await LedgerTx.create({ businessPhone, partyId, type, amount, description, imageUrl });
+        
+        const party = await Party.findById(partyId);
+        if (party) {
+            if (type === 'bill') party.balance += Number(amount);
+            if (type === 'payment') party.balance -= Number(amount);
+            await party.save();
+        }
+        return res.status(201).json({ success: true, data: tx, newBalance: party ? party.balance : 0 });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.post('/api/ledger/send-statement', async (req, res) => {
+    try {
+        const { businessPhone, partyId } = req.body;
+        const party = await Party.findById(partyId);
+        const business = await User.findOne({ phoneNumber: businessPhone });
+
+        let statementText = `🧾 *Account Ledger Statement*\n\nDear *${party.name}*,\n`;
+        if (party.balance > 0) {
+            statementText += `Your current outstanding balance with us is *₹${party.balance}*.\nKindly clear the dues at your earliest convenience.`;
+        } else if (party.balance < 0) {
+            statementText += `Your account has an advance balance of *₹${Math.abs(party.balance)}*.`;
+        } else {
+            statementText += `Your account balance is clean and fully settled (₹0).`;
+        }
+        statementText += `\n\n_Generated via ${business.businessName}_`;
+
+        const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, party.phone, statementText);
+        if (outboundId) {
+            const noteMsg = await Message.create({ businessPhone, whatsappId: outboundId, fromNumber: party.phone, body: `[Sent Ledger Statement Summary: Current Balance ₹${party.balance}]`, direction: 'outgoing' });
+            io.to(businessPhone).emit('new_message', noteMsg);
+            return res.status(200).json({ success: true });
+        }
+        return res.status(400).json({ success: false, message: "Meta API distribution failed." });
+    } catch (error) { return res.status(500).json({ success: false }); }
+});
+
+app.post('/api/ledger/upload-bill', upload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) return res.status(400).json({ success: false, message: "No document specified" });
+        const result = await cloudinary.uploader.upload(req.file.path, { folder: "saas_ledger_bills" });
+        fs.unlinkSync(req.file.path);
+        return res.status(200).json({ success: true, url: result.secure_url });
+    } catch (error) { return res.status(500).json({ success: false, message: "Cloudinary upload error" }); }
 });
 
 // ====================================================================
 // WEBHOOKS
 // ====================================================================
 
+// 🚀 OPTION C INVENTORY ENGINE (AUTOMATED WEBHOOK OVERRIDE)
 app.post('/razorpay-webhook', async (req, res) => {
-    console.log("🔔 WEBHOOK HIT:", req.body ? req.body.event : 'Unknown');
     try {
         const signature = req.headers['x-razorpay-signature'];
         const bodyToHash = req.rawBody || JSON.stringify(req.body);
         const expectedSignature = crypto.createHmac('sha256', RAZORPAY_WEBHOOK_SECRET).update(bodyToHash).digest('hex');
         
-        if (expectedSignature !== signature) {
-            console.error("❌ Webhook Signature Mismatch!");
-            return res.status(400).send('Invalid signature');
-        }
+        if (expectedSignature !== signature) return res.status(400).send('Invalid signature');
 
         if (req.body.event === 'payment_link.paid') {
             const entity = req.body.payload.payment_link.entity;
@@ -849,10 +883,8 @@ app.post('/razorpay-webhook', async (req, res) => {
                 const user = await User.findOne({ phoneNumber: businessPhone });
                 if (user && user.lastPaymentId !== subOrderId && amountPaid >= 10000 && paymentCurrency === 'INR') {
                     user.subscriptionStatus = 'active';
-                    user.subscriptionExpiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
                     user.lastPaymentId = subOrderId;
                     await user.save();
-                    console.log(`✅ SaaS SUBSCRIPTION PAID & UNLOCKED FOR: ${businessPhone}`);
                 }
             } 
             else {
@@ -864,9 +896,7 @@ app.post('/razorpay-webhook', async (req, res) => {
                     await order.save();
                     io.to(order.businessPhone).emit('order_updated', order); 
                     
-                    for (let item of order.items) { 
-                        await Product.findOneAndUpdate({ businessPhone: order.businessPhone, name: item.name }, { $inc: { stockQuantity: -item.quantity } }); 
-                    }
+                    await processInventoryDeduction(order.businessPhone, order.items);
 
                     const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, `✅ Payment of ₹${order.totalAmount} received automatically via Razorpay!`);
                     const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Sent Automated Payment Receipt]`, direction: 'outgoing' });
@@ -875,9 +905,7 @@ app.post('/razorpay-webhook', async (req, res) => {
             }
         }
         res.status(200).send('OK');
-    } catch (e) { 
-        res.status(500).send('Webhook Error'); 
-    }
+    } catch (e) { res.status(500).send('Webhook Error'); }
 });
 
 app.get('/webhook', (req, res) => {
@@ -896,29 +924,13 @@ app.post('/webhook', async (req, res) => {
             
             const businessPhoneId = body.entry[0].changes[0].value.metadata.phone_number_id;
             const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
-            
-            if (!businessUser) {
-                console.log("Message received for unregistered Phone ID:", businessPhoneId);
-                return res.status(200).send('EVENT_RECEIVED'); 
-            }
+            if (!businessUser) return res.status(200).send('EVENT_RECEIVED'); 
 
             let currentSubStatus = businessUser.subscriptionStatus;
-            
-            if (new Date() > businessUser.subscriptionExpiresAt && currentSubStatus !== 'suspended') {
-                businessUser.subscriptionStatus = 'suspended';
-                businessUser.consumedReceipts.push('AUTO_EXPIRE_' + Date.now());
-                await businessUser.save();
-                currentSubStatus = 'suspended';
-                console.log(`⏳ Subscription Expired via Webhook. Account locked for: ${businessUser.businessName}`);
-            }
-
-            if (currentSubStatus === 'suspended') {
-                return res.status(200).send('EVENT_RECEIVED');
-            }
+            if (currentSubStatus === 'suspended') return res.status(200).send('EVENT_RECEIVED');
 
             const activeBusinessPhone = businessUser.phoneNumber;
             const activeMetaToken = businessUser.metaToken;
-
             const messageData = body.entry[0].changes[0].value.messages[0];
             const from = messageData.from; 
             const messageId = messageData.id;
@@ -943,8 +955,8 @@ app.post('/webhook', async (req, res) => {
                     const qty = item.quantity || 1;
                     
                     const dbProduct = await Product.findOne({ businessPhone: activeBusinessPhone, name: item.product_retailer_id });
-                    if (dbProduct && qty > dbProduct.stockQuantity) {
-                        stockErrorMsg += `❌ *${item.product_retailer_id}* (You ordered ${qty}, but we only have ${dbProduct.stockQuantity} left!)\n`;
+                    if (dbProduct && qty > (dbProduct.shopStock || dbProduct.stockQuantity || 0)) {
+                        stockErrorMsg += `❌ *${item.product_retailer_id}* (You ordered ${qty}, but we only have ${dbProduct.shopStock} left in the shop!)\n`;
                     }
                     
                     totalAmount += (price * qty); 
@@ -1036,7 +1048,7 @@ app.post('/webhook', async (req, res) => {
                             let catalogText = "📦 *Live Inventory Catalog:*\n\n";
                             inventory.forEach((item, index) => {
                                 const priceDisplay = item.price === 0 ? "Ask for Quote 📝" : `₹${item.price}`;
-                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.stockQuantity}\n\n`;
+                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.shopStock} ${item.unit || 'pcs'}\n\n`;
                             });
                             catalogText += "🛒 *To order:* Simply reply with the items you need!";
                             const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, catalogText);
@@ -1074,9 +1086,7 @@ app.post('/webhook', async (req, res) => {
 // ====================================================================
 setInterval(async () => {
     try {
-        console.log("🔍 Scanning for abandoned carts...");
         const twoHoursAgo = new Date(Date.now() - 2 * 60 * 60 * 1000);
-
         const abandonedOrders = await Order.find({
             status: { $ne: 'paid' },
             createdAt: { $lt: twoHoursAgo },
@@ -1088,29 +1098,18 @@ setInterval(async () => {
             
             if (business && business.subscriptionStatus === 'active') {
                 let reminderText = `🛒 *Cart Reminder!*\n\nHi! We noticed you left some items in your cart a few hours ago.\n\nYour total is ₹${order.totalAmount}.\n\nReply to this message if you need any help completing your order, or let us know if you'd like to make changes!`;
-                
                 const outboundId = await sendWhatsAppMessage(business.metaPhoneId, business.metaToken, order.customerPhone, reminderText);
                 
                 if (outboundId) {
                     order.reminderSent = true; 
                     await order.save();
-
-                    const systemReply = await Message.create({ 
-                        businessPhone: order.businessPhone, 
-                        whatsappId: outboundId || `reply-${Date.now()}`, 
-                        fromNumber: order.customerPhone, 
-                        body: `[Automated Abandoned Cart Reminder Sent]`, 
-                        direction: 'outgoing' 
-                    });
+                    const systemReply = await Message.create({ businessPhone: order.businessPhone, whatsappId: outboundId || `reply-${Date.now()}`, fromNumber: order.customerPhone, body: `[Automated Abandoned Cart Reminder Sent]`, direction: 'outgoing' });
                     io.to(order.businessPhone).emit('new_message', systemReply);
-                    console.log(`✅ Sent abandoned cart reminder to ${order.customerPhone}`);
                 }
             }
         }
-    } catch (err) {
-        console.error("❌ Abandoned Cart Engine Error:", err);
-    }
+    } catch (err) { console.error("❌ Abandoned Cart Engine Error:", err); }
 }, 30 * 60 * 1000);
 
 app.get('/', (req, res) => res.send('WebSocket SaaS Server Alive!'));
-server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V4 SAAS SECURED]"));
+server.listen(PORT, () => console.log("🚀 Server running on port " + PORT + " [V6 SAAS SECURED]"));
