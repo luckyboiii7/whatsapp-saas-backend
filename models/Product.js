@@ -1,13 +1,17 @@
 const mongoose = require('mongoose');
 
-const ProductSchema = new mongoose.Schema({
-    businessPhone: { type: String, required: true }, // 🏢 SaaS Tenant ID
+const productSchema = new mongoose.Schema({
+    businessPhone: { type: String, required: true },
     name: { type: String, required: true },
     description: { type: String },
-    price: { type: Number, required: true, default: 0 }, 
-    stockQuantity: { type: Number, required: true, default: 0 }, 
+    price: { type: Number, default: 0 },
+    
+    // 📦 The New Split Inventory System
+    shopStock: { type: Number, default: 0 },
+    godownStock: { type: Number, default: 0 },
+    
     imageUrl: { type: String },
     createdAt: { type: Date, default: Date.now }
 });
 
-module.exports = mongoose.model('Product', ProductSchema);
+module.exports = mongoose.model('Product', productSchema);
