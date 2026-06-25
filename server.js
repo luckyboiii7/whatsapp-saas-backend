@@ -920,161 +920,174 @@ app.post('/webhook', async (req, res) => {
     const body = req.body;
     
     if (body.object === 'whatsapp_business_account') {
-        if (body.entry && body.entry[0].changes && body.entry[0].changes[0].value.messages) {
-            
-            const businessPhoneId = body.entry[0].changes[0].value.metadata.phone_number_id;
-            const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
-            if (!businessUser) return res.status(200).send('EVENT_RECEIVED'); 
+        try {
+            if (body.entry && body.entry.length > 0 && body.entry[0].changes && body.entry[0].changes.length > 0 && body.entry[0].changes[0].value.messages) {
+                
+                const value = body.entry[0].changes[0].value;
 
-            let currentSubStatus = businessUser.subscriptionStatus;
-            if (currentSubStatus === 'suspended') return res.status(200).send('EVENT_RECEIVED');
-
-            const activeBusinessPhone = businessUser.phoneNumber;
-            const activeMetaToken = businessUser.metaToken;
-            const messageData = body.entry[0].changes[0].value.messages[0];
-            const from = messageData.from; 
-            const messageId = messageData.id;
-
-            let extractedName = "Unknown";
-            if (body.entry[0].changes[0].value.contacts && body.entry[0].changes[0].value.contacts.length > 0) {
-                extractedName = body.entry[0].changes[0].value.contacts[0].profile.name || "Unknown";
-            }
-
-            const botStatus = await BotStatus.findOne({ businessPhone: activeBusinessPhone, customerPhone: String(from) });
-            const isPaused = botStatus && botStatus.isBotPaused;
-
-            if (messageData.type === 'order') {
-                const items = messageData.order.product_items;
-                let totalAmount = 0; 
-                let requiresQuotation = false; 
-                let formattedItems = [];
-                let stockErrorMsg = "";
-
-                for (let item of items) {
-                    const price = item.item_price || 0; 
-                    const qty = item.quantity || 1;
-                    
-                    const dbProduct = await Product.findOne({ businessPhone: activeBusinessPhone, name: item.product_retailer_id });
-                    if (dbProduct && qty > (dbProduct.shopStock || dbProduct.stockQuantity || 0)) {
-                        stockErrorMsg += `❌ *${item.product_retailer_id}* (You ordered ${qty}, but we only have ${dbProduct.shopStock} left in the shop!)\n`;
-                    }
-                    
-                    totalAmount += (price * qty); 
-                    if (price === 0) requiresQuotation = true; 
-                    formattedItems.push({ name: item.product_retailer_id, quantity: qty, price: price });
-                }
-
-                if (stockErrorMsg !== "") {
-                    const replyText = `⚠️ *Order Cannot Be Processed*\n\nSome items in your cart are out of stock:\n${stockErrorMsg}\nPlease adjust your cart and try sending again.`;
-                    const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
-                    const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Rejected Cart: Stock Limit Reached]`, direction: 'outgoing' });
-                    io.to(activeBusinessPhone).emit('new_message', systemReply);
+                // Safely extract metadata to prevent crash from mock test scripts or malformed payloads
+                const businessPhoneId = value.metadata?.phone_number_id;
+                
+                if (!businessPhoneId) {
+                    console.warn("⚠️ Webhook missing metadata.phone_number_id - likely a test payload");
                     return res.status(200).send('EVENT_RECEIVED');
                 }
 
-                const routingMode = requiresQuotation ? 'quotation' : 'instant_pay';
-                const newOrder = await Order.create({ businessPhone: activeBusinessPhone, customerPhone: String(from), items: formattedItems, totalAmount: totalAmount, routingMode: routingMode, status: requiresQuotation ? 'pending_quote' : 'pending_payment' });
-                io.to(activeBusinessPhone).emit('new_order', newOrder);
+                const businessUser = await User.findOne({ metaPhoneId: businessPhoneId });
+                if (!businessUser) return res.status(200).send('EVENT_RECEIVED'); 
 
-                const cartSummary = `🛒 *Cart Received* | Mode: ${routingMode.toUpperCase()}\nItems: ${items.length}\nTotal: ₹${totalAmount}`;
-                const incomingMsg = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: messageId, fromNumber: String(from), customerName: extractedName, body: cartSummary, direction: 'incoming' });
-                io.to(activeBusinessPhone).emit('new_message', incomingMsg);
+                let currentSubStatus = businessUser.subscriptionStatus;
+                if (currentSubStatus === 'suspended') return res.status(200).send('EVENT_RECEIVED');
 
-                if (isPaused) return res.status(200).send('EVENT_RECEIVED');
+                const activeBusinessPhone = businessUser.phoneNumber;
+                const activeMetaToken = businessUser.metaToken;
+                const messageData = value.messages[0];
+                const from = messageData.from; 
+                const messageId = messageData.id;
 
-                if (requiresQuotation) {
-                    const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, "🛒 We received your cart! Because it contains custom materials, we are calculating your bulk discount and final quotation. A human agent will message you shortly. 🛠️");
-                    const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Quotation Notice]`, direction: 'outgoing' });
-                    io.to(activeBusinessPhone).emit('new_message', systemReply);
-                } else {
-                    const replyText = `🛒 We received your cart! Your total is ₹${totalAmount}. How would you like to proceed?`;
-                    const buttons = [{ id: `pay_${newOrder._id}_${totalAmount}`, title: "💳 Pay Now" }, { id: `invoice_${newOrder._id}`, title: "📝 Request Invoice" }];
-                    const outboundId = await sendWhatsAppButtons(businessPhoneId, activeMetaToken, from, replyText, buttons);
-                    const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Payment Options for ₹${totalAmount}]`, direction: 'outgoing' });
-                    io.to(activeBusinessPhone).emit('new_message', systemReply);
+                let extractedName = "Unknown";
+                if (value.contacts && value.contacts.length > 0 && value.contacts[0].profile) {
+                    extractedName = value.contacts[0].profile.name || "Unknown";
                 }
-                return res.status(200).send('EVENT_RECEIVED');
-            }
 
-            let msgBody = "";
-            let buttonIdMatch = "";
+                const botStatus = await BotStatus.findOne({ businessPhone: activeBusinessPhone, customerPhone: String(from) });
+                const isPaused = botStatus && botStatus.isBotPaused;
 
-            if (messageData.text) {
-                msgBody = messageData.text.body.trim();
-            } else if (messageData.interactive && messageData.interactive.button_reply) {
-                msgBody = messageData.interactive.button_reply.title;
-                buttonIdMatch = messageData.interactive.button_reply.id;
-            } else if (messageData.type === 'image') {
-                msgBody = `[MEDIA:image:${messageData.image.id}]`;
-            } else if (messageData.type === 'audio') {
-                msgBody = `[MEDIA:audio:${messageData.audio.id}]`;
-            } else if (messageData.type === 'document') {
-                msgBody = `[MEDIA:document:${messageData.document.id}]`;
-            }
+                if (messageData.type === 'order') {
+                    const items = messageData.order.product_items;
+                    let totalAmount = 0; 
+                    let requiresQuotation = false; 
+                    let formattedItems = [];
+                    let stockErrorMsg = "";
 
-            if (msgBody) {
-                try {
-                    const incomingMsg = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: messageId, fromNumber: String(from), customerName: extractedName, body: msgBody, direction: 'incoming' });
-                    io.to(activeBusinessPhone).emit('new_message', incomingMsg);
+                    for (let item of items) {
+                        const price = item.item_price || 0; 
+                        const qty = item.quantity || 1;
+                        
+                        const dbProduct = await Product.findOne({ businessPhone: activeBusinessPhone, name: item.product_retailer_id });
+                        if (dbProduct && qty > (dbProduct.shopStock || dbProduct.stockQuantity || 0)) {
+                            stockErrorMsg += `❌ *${item.product_retailer_id}* (You ordered ${qty}, but we only have ${dbProduct.shopStock} left in the shop!)\n`;
+                        }
+                        
+                        totalAmount += (price * qty); 
+                        if (price === 0) requiresQuotation = true; 
+                        formattedItems.push({ name: item.product_retailer_id, quantity: qty, price: price });
+                    }
 
-                    if (isPaused) return res.status(200).send('EVENT_RECEIVED');
-
-                    const lookupQuery = buttonIdMatch ? buttonIdMatch.toLowerCase() : msgBody.toLowerCase();
-                    
-                    if (lookupQuery.startsWith('pay_')) {
-                        const parts = lookupQuery.split('_');
-                        const paymentLink = await generateRazorpayLink(parts[2], parts[1], from);
-                        const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, `Here is your secure payment link for Order #${parts[1].substring(0,6)}: \n\n${paymentLink}`);
-                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Secure Payment Link]`, direction: 'outgoing' });
+                    if (stockErrorMsg !== "") {
+                        const replyText = `⚠️ *Order Cannot Be Processed*\n\nSome items in your cart are out of stock:\n${stockErrorMsg}\nPlease adjust your cart and try sending again.`;
+                        const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
+                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Rejected Cart: Stock Limit Reached]`, direction: 'outgoing' });
                         io.to(activeBusinessPhone).emit('new_message', systemReply);
                         return res.status(200).send('EVENT_RECEIVED');
                     }
 
-                    if (['hello', 'hi', 'menu'].includes(lookupQuery)) {
-                        const multiChoiceBody = "👋 Welcome! How can we help you today?";
-                        const buttonMenu = [{ id: "products", title: "📁 View Products" }, { id: "contact", title: "👨‍💻 Speak to Human" }];
-                        const outboundId = await sendWhatsAppButtons(businessPhoneId, activeMetaToken, from, multiChoiceBody, buttonMenu);
-                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
-                        io.to(activeBusinessPhone).emit('new_message', systemReply);
-                    } 
-                    else if (lookupQuery === 'products') {
-                        const inventory = await Product.find({ businessPhone: activeBusinessPhone }).limit(10); 
-                        
-                        if (inventory.length === 0) {
-                            const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, "Our catalog is currently being updated. Please check back later!");
-                            const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Catalog Empty Message Sent]`, direction: 'outgoing' });
-                            io.to(activeBusinessPhone).emit('new_message', systemReply);
-                        } else {
-                            let catalogText = "📦 *Live Inventory Catalog:*\n\n";
-                            inventory.forEach((item, index) => {
-                                const priceDisplay = item.price === 0 ? "Ask for Quote 📝" : `₹${item.price}`;
-                                catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.shopStock} ${item.unit || 'pcs'}\n\n`;
-                            });
-                            catalogText += "🛒 *To order:* Simply reply with the items you need!";
-                            const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, catalogText);
-                            const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Dynamic Catalog from DB]`, direction: 'outgoing' });
-                            io.to(activeBusinessPhone).emit('new_message', systemReply);
-                        }
-                    } 
-                    else if (!msgBody.startsWith('[MEDIA:')) {
-                        const allRules = await Rule.find({ businessPhone: activeBusinessPhone });
-                        let matchedRule = null;
-                        
-                        for (let rule of allRules) {
-                            const triggerWords = rule.keyword.split(',').map(w => w.trim().toLowerCase());
-                            if (triggerWords.some(trigger => lookupQuery.includes(trigger))) {
-                                matchedRule = rule;
-                                break; 
-                            }
-                        }
+                    const routingMode = requiresQuotation ? 'quotation' : 'instant_pay';
+                    const newOrder = await Order.create({ businessPhone: activeBusinessPhone, customerPhone: String(from), items: formattedItems, totalAmount: totalAmount, routingMode: routingMode, status: requiresQuotation ? 'pending_quote' : 'pending_payment' });
+                    io.to(activeBusinessPhone).emit('new_order', newOrder);
 
-                        let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
-                        const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
-                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: replyText, direction: 'outgoing' });
+                    const cartSummary = `🛒 *Cart Received* | Mode: ${routingMode.toUpperCase()}\nItems: ${items.length}\nTotal: ₹${totalAmount}`;
+                    const incomingMsg = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: messageId, fromNumber: String(from), customerName: extractedName, body: cartSummary, direction: 'incoming' });
+                    io.to(activeBusinessPhone).emit('new_message', incomingMsg);
+
+                    if (isPaused) return res.status(200).send('EVENT_RECEIVED');
+
+                    if (requiresQuotation) {
+                        const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, "🛒 We received your cart! Because it contains custom materials, we are calculating your bulk discount and final quotation. A human agent will message you shortly. 🛠️");
+                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Quotation Notice]`, direction: 'outgoing' });
+                        io.to(activeBusinessPhone).emit('new_message', systemReply);
+                    } else {
+                        const replyText = `🛒 We received your cart! Your total is ₹${totalAmount}. How would you like to proceed?`;
+                        const buttons = [{ id: `pay_${newOrder._id}_${totalAmount}`, title: "💳 Pay Now" }, { id: `invoice_${newOrder._id}`, title: "📝 Request Invoice" }];
+                        const outboundId = await sendWhatsAppButtons(businessPhoneId, activeMetaToken, from, replyText, buttons);
+                        const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Payment Options for ₹${totalAmount}]`, direction: 'outgoing' });
                         io.to(activeBusinessPhone).emit('new_message', systemReply);
                     }
-                } catch (dbError) { console.error("❌ Webhook Error:", dbError); }
+                    return res.status(200).send('EVENT_RECEIVED');
+                }
+
+                let msgBody = "";
+                let buttonIdMatch = "";
+
+                if (messageData.text) {
+                    msgBody = messageData.text.body.trim();
+                } else if (messageData.interactive && messageData.interactive.button_reply) {
+                    msgBody = messageData.interactive.button_reply.title;
+                    buttonIdMatch = messageData.interactive.button_reply.id;
+                } else if (messageData.type === 'image') {
+                    msgBody = `[MEDIA:image:${messageData.image.id}]`;
+                } else if (messageData.type === 'audio') {
+                    msgBody = `[MEDIA:audio:${messageData.audio.id}]`;
+                } else if (messageData.type === 'document') {
+                    msgBody = `[MEDIA:document:${messageData.document.id}]`;
+                }
+
+                if (msgBody) {
+                    try {
+                        const incomingMsg = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: messageId, fromNumber: String(from), customerName: extractedName, body: msgBody, direction: 'incoming' });
+                        io.to(activeBusinessPhone).emit('new_message', incomingMsg);
+
+                        if (isPaused) return res.status(200).send('EVENT_RECEIVED');
+
+                        const lookupQuery = buttonIdMatch ? buttonIdMatch.toLowerCase() : msgBody.toLowerCase();
+                        
+                        if (lookupQuery.startsWith('pay_')) {
+                            const parts = lookupQuery.split('_');
+                            const paymentLink = await generateRazorpayLink(parts[2], parts[1], from);
+                            const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, `Here is your secure payment link for Order #${parts[1].substring(0,6)}: \n\n${paymentLink}`);
+                            const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Secure Payment Link]`, direction: 'outgoing' });
+                            io.to(activeBusinessPhone).emit('new_message', systemReply);
+                            return res.status(200).send('EVENT_RECEIVED');
+                        }
+
+                        if (['hello', 'hi', 'menu'].includes(lookupQuery)) {
+                            const multiChoiceBody = "👋 Welcome! How can we help you today?";
+                            const buttonMenu = [{ id: "products", title: "📁 View Products" }, { id: "contact", title: "👨‍💻 Speak to Human" }];
+                            const outboundId = await sendWhatsAppButtons(businessPhoneId, activeMetaToken, from, multiChoiceBody, buttonMenu);
+                            const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Menu]: ${multiChoiceBody}`, direction: 'outgoing' });
+                            io.to(activeBusinessPhone).emit('new_message', systemReply);
+                        } 
+                        else if (lookupQuery === 'products') {
+                            const inventory = await Product.find({ businessPhone: activeBusinessPhone }).limit(10); 
+                            
+                            if (inventory.length === 0) {
+                                const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, "Our catalog is currently being updated. Please check back later!");
+                                const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Catalog Empty Message Sent]`, direction: 'outgoing' });
+                                io.to(activeBusinessPhone).emit('new_message', systemReply);
+                            } else {
+                                let catalogText = "📦 *Live Inventory Catalog:*\n\n";
+                                inventory.forEach((item, index) => {
+                                    const priceDisplay = item.price === 0 ? "Ask for Quote 📝" : `₹${item.price}`;
+                                    catalogText += `${index + 1}. *${item.name}*\n   _${item.description}_\n   💰 Price: ${priceDisplay} | 📦 In Stock: ${item.shopStock} ${item.unit || 'pcs'}\n\n`;
+                                });
+                                catalogText += "🛒 *To order:* Simply reply with the items you need!";
+                                const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, catalogText);
+                                const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: `[Sent Dynamic Catalog from DB]`, direction: 'outgoing' });
+                                io.to(activeBusinessPhone).emit('new_message', systemReply);
+                            }
+                        } 
+                        else if (!msgBody.startsWith('[MEDIA:')) {
+                            const allRules = await Rule.find({ businessPhone: activeBusinessPhone });
+                            let matchedRule = null;
+                            
+                            for (let rule of allRules) {
+                                const triggerWords = rule.keyword.split(',').map(w => w.trim().toLowerCase());
+                                if (triggerWords.some(trigger => lookupQuery.includes(trigger))) {
+                                    matchedRule = rule;
+                                    break; 
+                                }
+                            }
+
+                            let replyText = matchedRule ? matchedRule.replyText : `🤖 I don't recognize that. Type "Menu" to start over!`;
+                            const outboundId = await sendWhatsAppMessage(businessPhoneId, activeMetaToken, from, replyText);
+                            const systemReply = await Message.create({ businessPhone: activeBusinessPhone, whatsappId: outboundId || `reply-${messageId}`, fromNumber: String(from), customerName: extractedName, body: replyText, direction: 'outgoing' });
+                            io.to(activeBusinessPhone).emit('new_message', systemReply);
+                        }
+                    } catch (dbError) { console.error("❌ DB Webhook Error:", dbError); }
+                }
             }
+        } catch (webhookError) {
+            console.error("❌ Webhook Execution Error:", webhookError);
         }
         return res.status(200).send('EVENT_RECEIVED');
     }
